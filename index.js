@@ -22,6 +22,16 @@ bot.setMyCommands([
   { command: "help", description: "Help on how to use the bot" },
 ]);
 
+// When someone types /post or /help in the group, redirect them to the bot privately
+bot.onText(/\/post|\/help/, async (msg) => {
+  if (msg.chat.type !== "private") {
+    return bot.sendMessage(
+      msg.chat.id,
+      `👉 Please use this command in private chat: https://t.me/${botUsername}`
+    );
+  }
+});
+
 // START command
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
@@ -210,8 +220,10 @@ await bot.editMessageReplyMarkup(
 // COMMENT handler when users click “💬 Comment”
 bot.onText(/\/start comment_(.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const messageId = match[1]; // Now using the actual message_id directly
-  const post = posts[messageId];
+const messageId = match[1].trim();
+const post = posts[messageId];
+console.log("🔗 Comment requested for message:", messageId);
+
 
   if (!post) {
     return bot.sendMessage(chatId, "⚠️ Sorry, this post no longer exists.");
@@ -244,6 +256,7 @@ bot.on("message", async (msg) => {
     }
 
     post.comments.push(text);
+    console.log(`📝 New comment added to post ${session.messageId}:`, text);
 
     // Update comment count on group post
     const count = post.comments.length;
