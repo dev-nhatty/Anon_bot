@@ -220,21 +220,31 @@ await bot.editMessageReplyMarkup(
 // COMMENT handler when users click “💬 Comment”
 bot.onText(/\/start comment_(.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
-const messageId = match[1].trim();
-const post = posts[messageId];
-console.log("🔗 Comment requested for message:", messageId);
-
+  const messageId = match[1].trim();
+  const post = posts[messageId];
+  console.log("🔗 Comment requested for message:", messageId);
 
   if (!post) {
     return bot.sendMessage(chatId, "⚠️ Sorry, this post no longer exists.");
   }
 
-  // Ask user for comment
-  await bot.sendMessage(chatId, `💬 Add your anonymous comment for this post:\n\n${post.text}\n\n(Type /cancel to stop)`);
+  // Format all previous comments
+  const comments =
+    post.comments.length > 0
+      ? post.comments.map((c, i) => `💭 ${i + 1}. ${c}`).join("\n\n")
+      : "No comments yet. Be the first to comment!";
 
-  // Track that this user is commenting on this post
+  // Show post and comments together
+  await bot.sendMessage(
+    chatId,
+    `🗣 *Post:*\n${post.text}\n\n💬 *Comments:*\n${comments}\n\nType your anonymous comment below or /cancel to stop.`,
+    { parse_mode: "Markdown" }
+  );
+
+  // Track commenting session
   userSessions[chatId] = { step: "commenting", messageId };
 });
+
 
 // Handle actual comment submission
 bot.on("message", async (msg) => {
