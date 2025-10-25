@@ -1,274 +1,270 @@
-// ------------------------------
-// 1️⃣ Setup & Imports
-// ------------------------------
-const TelegramBot = require("node-telegram-bot-api");
-require("dotenv").config();
+import TelegramBot from "node-telegram-bot-api";
+import dotenv from "dotenv";
+dotenv.config();
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
-// Replace this with your group chat ID (example: -1002345678901)
-const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
-const BOT_USERNAME = process.env.BOT_USERNAME; // e.g., 'MyAnonBot'
+// In-memory data storage (use DB like MongoDB later for persistence)
+const userSessions = {};
+const posts = {}; // { messageId: { text, comments: [] } }
 
-// Store temporary user drafts and comments
-const userDrafts = {};
-const postComments = {};
+// Get bot username dynamically
+let botUsername = "";
+bot.getMe().then((me) => {
+  botUsername = me.username;
+  console.log(`🤖 Bot @${botUsername} is running...`);
+});
 
-// ------------------------------
-// 2️⃣ Helper Functions
-// ------------------------------
-function sendMainMenu(chatId) {
-  bot.sendMessage(chatId, "Welcome! 👋 Choose an option:", {
+// Commands setup (visible everywhere but they direct users to bot)
+bot.setMyCommands([
+  { command: "start", description: "Start using the bot" },
+  { command: "post", description: "Create an anonymous post" },
+  { command: "help", description: "Help on how to use the bot" },
+]);
+
+// START command
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  // Only interact privately
+  if (msg.chat.type !== "private") {
+    return bot.sendMessage(
+      chatId,
+      `👉 Please message me privately to start posting: https://t.me/${botUsername}`
+    );
+  }
+
+  const opts = {
     reply_markup: {
       keyboard: [
         [{ text: "📝 Post" }, { text: "ℹ️ Help" }],
       ],
       resize_keyboard: true,
-      one_time_keyboard: true,
     },
-  });
-}
-
-function showHelp(chatId) {
-  const text = `
-📘 *Anonymous Posting Bot Help*
-
-• *Post* → Create an anonymous post for the group.
-• *Help* → See this help message.
-• All posts remain anonymous.
-• Only group members can post or comment.
-  `;
-  bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
-}
-
-async function checkGroupMembership(userId) {
-  try {
-    const member = await bot.getChatMember(GROUP_CHAT_ID, userId);
-    return ["member", "administrator", "creator"].includes(member.status);
-  } catch (e) {
-    return false;
-  }
-}
-
-// ------------------------------
-// 3️⃣ Main Menu Logic
-// ------------------------------
-bot.onText(/\/start|Start/i, async (msg) => {
-  const chatId = msg.chat.id;
-
-  if (msg.chat.type !== "private") {
-    // Redirect to private chat
-    bot.sendMessage(
-      chatId,
-      `👋 Hi ${msg.from.first_name}, please continue anonymously here:\n👉 [Open Bot](https://t.me/${BOT_USERNAME}?start=start)`,
-      { parse_mode: "Markdown" }
-    );
-    return;
-  }
-
-  sendMainMenu(chatId);
+  };
+  bot.sendMessage(chatId, "Welcome! Choose an action:", opts);
 });
 
+// HELP command
+bot.onText(/\/help/, async (msg) => {
+  const chatId = msg.chat.id;
+  if (msg.chat.type !== "private") {
+    return bot.sendMessage(chatId, `💬 Please use this command in private chat.`);
+  }
+
+  bot.sendMessage(
+    chatId,
+    `🤖 *Anonymous Posting Bot Help*\n\n📝 *Post* — Create a new anonymous post.\n✏️ *Edit* — Edit your message before submitting.\n🎨 *Format* — Choose formatting style.\n🚫 *Cancel* — Cancel current post.\n💬 *Comments* — Others can reply anonymously.`,
+    { parse_mode: "Markdown" }
+  );
+});
+
+// MAIN text listener
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
 
-  // Ignore non-private messages except redirections
+  // Skip non-private chats
   if (msg.chat.type !== "private") return;
 
-  if (text === "ℹ️ Help") {
-    return showHelp(chatId);
-  }
+  const session = userSessions[chatId] || {};
 
+  // Step 1: User clicks Post
   if (text === "📝 Post") {
-    const isMember = await checkGroupMembership(msg.from.id);
-    if (!isMember) {
-      return bot.sendMessage(
-        chatId,
-        "🚫 You must be a member of the group @ to post."
-      );
-    }
-
-    userDrafts[msg.from.id] = "";
-    return bot.sendMessage(chatId, "✏️ Please type your post message:", {
+    userSessions[chatId] = { step: "typing" };
+    return bot.sendMessage(chatId, "✍️ Type your message below:", {
       reply_markup: {
         keyboard: [[{ text: "❌ Cancel" }]],
+        resize_keyboard: true,
+        one_time_keyboard: true,
+      },
+    });
+  }
+
+  // Cancel posting
+  if (text === "❌ Cancel") {
+    delete userSessions[chatId];
+    return bot.sendMessage(chatId, "Cancelled ✅", {
+      reply_markup: {
+        keyboard: [[{ text: "📝 Post" }, { text: "ℹ️ Help" }]],
         resize_keyboard: true,
       },
     });
   }
 
-  // Cancel option
-  if (text === "❌ Cancel") {
-    delete userDrafts[msg.from.id];
-    return sendMainMenu(chatId);
-  }
-
-  // If user is typing a draft
-  if (userDrafts[msg.from.id] !== undefined && text !== undefined) {
-    userDrafts[msg.from.id] = text;
-
-    return bot.sendMessage(chatId, "Here’s your post preview:", {
-      parse_mode: "Markdown",
+  // Step 2: User types post content
+  if (session.step === "typing") {
+    userSessions[chatId] = { step: "confirming", text };
+    return bot.sendMessage(chatId, `🕵️ Preview:\n\n${text}`, {
       reply_markup: {
-        inline_keyboard: [
-          [{ text: "✏️ Edit", callback_data: "edit_post" }],
-          [{ text: "🖋️ Format", callback_data: "format_post" }],
-          [{ text: "✅ Submit", callback_data: "submit_post" }],
-          [{ text: "❌ Cancel", callback_data: "cancel_post" }],
+        keyboard: [
+          [{ text: "✏️ Edit" }, { text: "🎨 Format" }],
+          [{ text: "🚫 Cancel" }, { text: "✅ Submit" }],
         ],
+        resize_keyboard: true,
       },
     });
   }
+
+  // Step 3: Edit text
+  if (text === "✏️ Edit") {
+    session.step = "typing";
+    userSessions[chatId] = session;
+    return bot.sendMessage(chatId, "Please retype your message:");
+  }
+
+  // Step 4: Format options
+  if (text === "🎨 Format") {
+    session.step = "formatting";
+    userSessions[chatId] = session;
+    return bot.sendMessage(chatId, "Choose a format:", {
+      reply_markup: {
+        keyboard: [
+          [{ text: "Bold" }, { text: "Italic" }],
+          [{ text: "Monospace" }, { text: "Back" }],
+        ],
+        resize_keyboard: true,
+      },
+    });
+  }
+
+  // Apply selected format
+  if (["Bold", "Italic", "Monospace"].includes(text)) {
+    const content = session.text || "";
+    let formatted;
+
+    if (text === "Bold") formatted = `*${content}*`;
+    if (text === "Italic") formatted = `_${content}_`;
+    if (text === "Monospace") formatted = "`" + content + "`";
+
+    session.text = formatted;
+    session.step = "confirming";
+    userSessions[chatId] = session;
+
+    return bot.sendMessage(chatId, `🔍 Preview with *${text}* format:\n\n${formatted}`, {
+      parse_mode: "Markdown",
+      reply_markup: {
+        keyboard: [
+          [{ text: "✏️ Edit" }, { text: "🎨 Format" }],
+          [{ text: "🚫 Cancel" }, { text: "✅ Submit" }],
+        ],
+        resize_keyboard: true,
+      },
+    });
+  }
+
+  // Go back to preview from formatting
+  if (text === "Back") {
+    session.step = "confirming";
+    userSessions[chatId] = session;
+    return bot.sendMessage(chatId, `Back to preview:\n\n${session.text}`, {
+      parse_mode: "Markdown",
+    });
+  }
+
+  // Step 5: Submit
+  if (text === "✅ Submit" && session.text) {
+    const postText = session.text;
+    const userId = msg.from.id;
+
+    // Only allow group members to post
+    try {
+      const member = await bot.getChatMember(process.env.GROUP_CHAT_ID, userId);
+      if (!["member", "administrator", "creator"].includes(member.status)) {
+        return bot.sendMessage(chatId, "🚫 You must join the group first to post.");
+      }
+    } catch (e) {
+      console.log("Membership check failed:", e);
+      return bot.sendMessage(chatId, "⚠️ Unable to verify group membership.");
+    }
+
+// Send post to group first (without reply_markup)
+const sent = await bot.sendMessage(process.env.GROUP_CHAT_ID, postText, {
+  parse_mode: "Markdown",
 });
 
-// ------------------------------
-// 4️⃣ Handle Inline Button Actions
-// ------------------------------
-bot.on("callback_query", async (query) => {
-  const chatId = query.message.chat.id;
-  const userId = query.from.id;
-  const data = query.data;
-  const draft = userDrafts[userId];
+// Then safely add the button using the real message_id
+await bot.editMessageReplyMarkup(
+  {
+    inline_keyboard: [
+      [
+        { text: "💬 0 Comments", url: `https://t.me/${botUsername}?start=comment_${sent.message_id}` },
+      ],
+    ],
+  },
+  { chat_id: process.env.GROUP_CHAT_ID, message_id: sent.message_id }
+);
 
-  if (!draft) return;
 
-  switch (data) {
-    case "edit_post":
-      await bot.sendMessage(chatId, "✏️ Type your new message:");
-      break;
+    // Store post info
+    posts[sent.message_id] = {
+      text: postText,
+      comments: [],
+    };
 
-    case "format_post":
-      await bot.sendMessage(chatId, "🎨 Choose a text format:", {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "Bold", callback_data: "format_bold" }],
-            [{ text: "Italic", callback_data: "format_italic" }],
-            [{ text: "Code", callback_data: "format_code" }],
-            [{ text: "Back", callback_data: "back_to_preview" }],
-          ],
-        },
-      });
-      break;
+    delete userSessions[chatId];
 
-    case "back_to_preview":
-      await bot.sendMessage(chatId, "Here’s your post preview again:", {
-        text: draft,
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "✏️ Edit", callback_data: "edit_post" }],
-            [{ text: "🖋️ Format", callback_data: "format_post" }],
-            [{ text: "✅ Submit", callback_data: "submit_post" }],
-            [{ text: "❌ Cancel", callback_data: "cancel_post" }],
-          ],
-        },
-      });
-      break;
-
-    case "submit_post":
-      try {
-        const post = await bot.sendMessage(GROUP_CHAT_ID, draft, {
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  text: "💬 Comment",
-                  url: `https://t.me/${BOT_USERNAME}?start=comment_${query.from.id}`,
-                },
-              ],
-            ],
-          },
-        });
-        bot.sendMessage(chatId, "✅ Post submitted anonymously!");
-        delete userDrafts[userId];
-      } catch (err) {
-        console.error(err);
-        bot.sendMessage(chatId, "❌ Failed to post. Try again.");
-      }
-      break;
-
-    case "cancel_post":
-      delete userDrafts[userId];
-      sendMainMenu(chatId);
-      break;
-
-    case "format_bold":
-    case "format_italic":
-    case "format_code": {
-      let formatted = draft;
-      if (data === "format_bold") formatted = `*${draft}*`;
-      if (data === "format_italic") formatted = `_${draft}_`;
-      if (data === "format_code") formatted = `\`${draft}\``;
-
-      userDrafts[userId] = formatted;
-
-      await bot.sendMessage(chatId, "✨ Formatted Preview:", {
-        parse_mode: "Markdown",
-        text: formatted,
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "✅ Submit", callback_data: "submit_post" }],
-            [{ text: "✏️ Edit", callback_data: "edit_post" }],
-            [{ text: "🎨 Reformat", callback_data: "format_post" }],
-            [{ text: "❌ Cancel", callback_data: "cancel_post" }],
-          ],
-        },
-      });
-      break;
-    }
+    return bot.sendMessage(chatId, "✅ Your anonymous post has been sent!");
   }
 });
-
-// ------------------------------
-// 5️⃣ Handle Comments (via /start comment_x)
-// ------------------------------
+// COMMENT handler when users click “💬 Comment”
 bot.onText(/\/start comment_(.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const postId = match[1];
+  const messageId = match[1]; // Now using the actual message_id directly
+  const post = posts[messageId];
 
-  if (!postComments[postId]) postComments[postId] = [];
-
-  let comments = postComments[postId]
-    .map((c) => `• ${c}`)
-    .join("\n") || "No comments yet.";
-
-  await bot.sendMessage(chatId, `🗨️ Comments:\n${comments}`, {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "➕ Add Comment", callback_data: `add_comment_${postId}` }],
-        [{ text: "⬅️ Back", callback_data: "cancel_post" }],
-      ],
-    },
-  });
-});
-
-bot.on("callback_query", async (query) => {
-  const chatId = query.message.chat.id;
-  const data = query.data;
-
-  if (data.startsWith("add_comment_")) {
-    const postId = data.split("_")[2];
-    bot.sendMessage(chatId, "💬 Type your comment:");
-    userDrafts[chatId] = `commenting_${postId}`;
+  if (!post) {
+    return bot.sendMessage(chatId, "⚠️ Sorry, this post no longer exists.");
   }
+
+  // Ask user for comment
+  await bot.sendMessage(chatId, `💬 Add your anonymous comment for this post:\n\n${post.text}\n\n(Type /cancel to stop)`);
+
+  // Track that this user is commenting on this post
+  userSessions[chatId] = { step: "commenting", messageId };
 });
 
-bot.on("message", (msg) => {
+// Handle actual comment submission
+bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
+  const session = userSessions[chatId];
 
-  if (userDrafts[chatId] && userDrafts[chatId].startsWith("commenting_")) {
-    const postId = userDrafts[chatId].split("_")[1];
-    if (!postComments[postId]) postComments[postId] = [];
-    postComments[postId].push(text);
+  // Handle comment replies
+  if (session && session.step === "commenting") {
+    if (text === "/cancel") {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "🚫 Comment cancelled.");
+    }
 
-    delete userDrafts[chatId];
-    bot.sendMessage(chatId, "✅ Comment added anonymously!");
+    const post = posts[session.messageId];
+    if (!post) {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "⚠️ Sorry, this post no longer exists.");
+    }
+
+    post.comments.push(text);
+
+    // Update comment count on group post
+    const count = post.comments.length;
+    await bot.editMessageReplyMarkup(
+      {
+        inline_keyboard: [
+          [
+            {
+              text: `💬 ${count} Comments`,
+              url: `https://t.me/${botUsername}?start=comment_${session.messageId}`,
+            },
+          ],
+        ],
+      },
+      {
+        chat_id: process.env.GROUP_CHAT_ID,
+        message_id: session.messageId,
+      }
+    );
+
+    delete userSessions[chatId];
+    return bot.sendMessage(chatId, "✅ Comment added anonymously!");
   }
 });
-
-// ------------------------------
-// 6️⃣ Start Server
-// ------------------------------
-console.log("🤖 Bot is running...");
