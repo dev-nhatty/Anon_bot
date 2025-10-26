@@ -228,22 +228,39 @@ bot.onText(/\/start comment_(.+)/, async (msg, match) => {
     return bot.sendMessage(chatId, "⚠️ Sorry, this post no longer exists.");
   }
 
-  // Format all previous comments
-  const comments =
-    post.comments.length > 0
-      ? post.comments.map((c, i) => `💭 ${i + 1}. ${c}`).join("\n\n")
-      : "No comments yet. Be the first to comment!";
+  // Step 1: Show the main post first
+  await bot.sendMessage(chatId, `🗣 *Post:*\n${post.text}`, { parse_mode: "Markdown" });
 
-  // Show post and comments together
-  await bot.sendMessage(
-    chatId,
-    `🗣 *Post:*\n${post.text}\n\n💬 *Comments:*\n${comments}\n\nType your anonymous comment below or /cancel to stop.`,
-    { parse_mode: "Markdown" }
-  );
+  // Step 2: Send all comments separately, each with reactions & reply buttons
+  if (post.comments.length > 0) {
+    for (let i = 0; i < post.comments.length; i++) {
+      const comment = post.comments[i];
+      await bot.sendMessage(chatId, `💭 *Comment ${i + 1}:*\n${comment.text}`, {
 
-  // Track commenting session
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "👍 0", callback_data: `like_${messageId}_${i}` },
+              { text: "❤️ 0", callback_data: `love_${messageId}_${i}` },
+              { text: "😂 0", callback_data: `funny_${messageId}_${i}` },
+            ],
+            [{ text: "↩️ Reply", callback_data: `reply_${messageId}_${i}` }],
+          ],
+        },
+      });
+    }
+  } else {
+    await bot.sendMessage(chatId, "No comments yet. Be the first to comment!");
+  }
+
+  // Step 3: Ask user for new comment
+  await bot.sendMessage(chatId, "💬 Type your anonymous comment below or /cancel to stop.");
+
+  // Step 4: Track comment session
   userSessions[chatId] = { step: "commenting", messageId };
 });
+
 
 
 // Handle actual comment submission
@@ -258,6 +275,37 @@ bot.on("message", async (msg) => {
       delete userSessions[chatId];
       return bot.sendMessage(chatId, "🚫 Comment cancelled.");
     }
+
+    // Handle threaded replies
+if (session && session.step === "replying") {
+  const { messageId, commentIndex } = session;
+  const post = posts[messageId];
+  const comment = post?.comments[commentIndex];
+
+  if (!comment) {
+    delete userSessions[chatId];
+    return bot.sendMessage(chatId, "⚠️ Comment no longer exists.");
+  }
+
+  if (text === "/cancel") {
+    delete userSessions[chatId];
+    return bot.sendMessage(chatId, "🚫 Reply cancelled.");
+  }
+
+  // Save reply
+  comment.replies = comment.replies || [];
+  comment.replies.push(text);
+
+  delete userSessions[chatId];
+
+  await bot.sendMessage(chatId, "✅ Reply added anonymously!");
+
+  // Display threaded reply right under the comment
+  await bot.sendMessage(chatId, `↪️ *Reply to Comment ${commentIndex + 1}:*\n${text}`, {
+    parse_mode: "Markdown",
+  });
+}
+
 
     const post = posts[session.messageId];
     if (!post) {
@@ -290,4 +338,58 @@ bot.on("message", async (msg) => {
     delete userSessions[chatId];
     return bot.sendMessage(chatId, "✅ Comment added anonymously!");
   }
+  // Handle reactions and threaded replies
+bot.on("callback_query", async (query) => {
+  const { data, message } = query;
+  if (!data) return;
+
+  const chatId = message.chat.id;
+  const [action, postId, commentIndex] = data.split("_");
+  const post = posts[postId];
+
+  if (!post || !post.comments[commentIndex]) {
+    return bot.answerCallbackQuery(query.id, { text: "❌ Comment no longer exists." });
+  }
+
+  const comment = post.comments[commentIndex];
+
+  // --- Reaction handling ---
+  if (["like", "love", "funny"].includes(action)) {
+    comment.reactions = comment.reactions || { like: 0, love: 0, funny: 0 };
+    comment.reactions[action]++;
+
+    const r = comment.reactions;
+    await bot.editMessageReplyMarkup(
+      {
+        inline_keyboard: [
+          [
+            { text: `👍 ${r.like}`, callback_data: `like_${postId}_${commentIndex}` },
+            { text: `❤️ ${r.love}`, callback_data: `love_${postId}_${commentIndex}` },
+            { text: `😂 ${r.funny}`, callback_data: `funny_${postId}_${commentIndex}` },
+          ],
+          [{ text: "↩️ Reply", callback_data: `reply_${postId}_${commentIndex}` }],
+        ],
+      },
+      {
+        chat_id: chatId,
+        message_id: message.message_id,
+      }
+    );
+
+    return bot.answerCallbackQuery(query.id, { text: `You reacted with ${action}` });
+  }
+
+  // --- Reply handling ---
+  if (action === "reply") {
+    userSessions[chatId] = {
+      step: "replying",
+      messageId: postId,
+      commentIndex: parseInt(commentIndex),
+    };
+
+    await bot.sendMessage(chatId, "💬 Type your reply to this comment (or /cancel to stop):");
+    return bot.answerCallbackQuery(query.id);
+  }
+});
+
 });
