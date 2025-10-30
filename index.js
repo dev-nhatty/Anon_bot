@@ -313,7 +313,7 @@ if (session && session.step === "replying") {
       return bot.sendMessage(chatId, "⚠️ Sorry, this post no longer exists.");
     }
 
-    post.comments.push(text);
+    post.comments.push({ text, reactions: { like: 0, love: 0, funny: 0 }, replies: [] });
     console.log(`📝 New comment added to post ${session.messageId}:`, text);
 
     // Update comment count on group post
