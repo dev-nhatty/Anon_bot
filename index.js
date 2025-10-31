@@ -356,7 +356,7 @@ bot.on("callback_query", async (query) => {
 
   const comment = post.comments[commentIndex];
 
-  // --- Reaction handling ---
+  // --- Reaction handling (independent toggle) ---
   if (["like", "love", "funny"].includes(action)) {
     const idx = Number(commentIndex);
     if (Number.isNaN(idx)) {
@@ -370,31 +370,27 @@ bot.on("callback_query", async (query) => {
 
     const commentObj = posts[postId].comments[idx];
 
-    // Initialize reaction structures
+    // Initialize reactions and user reaction tracking
     commentObj.reactions = commentObj.reactions || { like: 0, love: 0, funny: 0 };
-    commentObj.userReactions = commentObj.userReactions || {}; // Track per-user reactions
+    commentObj.userReactions = commentObj.userReactions || {}; // userReactions[userId] = { like: true, love: false, ... }
 
     const userId = query.from.id;
-    const previousReaction = commentObj.userReactions[userId];
+    commentObj.userReactions[userId] = commentObj.userReactions[userId] || {};
 
-    // --- Toggle logic ---
-    if (previousReaction === action) {
-      // User clicked the same reaction → remove it
+    // Toggle the selected reaction independently
+    const alreadyReacted = commentObj.userReactions[userId][action];
+
+    if (alreadyReacted) {
       commentObj.reactions[action] = Math.max((commentObj.reactions[action] || 1) - 1, 0);
-      delete commentObj.userReactions[userId];
+      commentObj.userReactions[userId][action] = false;
       await bot.answerCallbackQuery(query.id, { text: `❌ Removed your ${action} reaction` });
     } else {
-      // User clicked a new reaction → switch
-      if (previousReaction) {
-        // Remove their old reaction first
-        commentObj.reactions[previousReaction] = Math.max((commentObj.reactions[previousReaction] || 1) - 1, 0);
-      }
       commentObj.reactions[action] = (commentObj.reactions[action] || 0) + 1;
-      commentObj.userReactions[userId] = action;
-      await bot.answerCallbackQuery(query.id, { text: `✅ You reacted: ${action}` });
+      commentObj.userReactions[userId][action] = true;
+      await bot.answerCallbackQuery(query.id, { text: `✅ Added your ${action} reaction` });
     }
 
-    // Update inline keyboard with new counts
+    // Update the inline keyboard with new counts
     const { like, love, funny } = commentObj.reactions;
 
     try {
@@ -415,7 +411,7 @@ bot.on("callback_query", async (query) => {
         }
       );
     } catch (err) {
-      console.error("Failed to edit message markup for reaction:", err.message || "Unknown error");
+      console.error("Failed to update reactions:", err.message);
     }
 
     return;
