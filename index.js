@@ -7,6 +7,7 @@ const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 // In-memory data storage (use DB like MongoDB later for persistence)
 const userSessions = {};
 const posts = {}; // { messageId: { text, comments: [] } }
+const userReactions = {}; // { `${postId}_${commentIndex}_${userId}`: true }
 
 // Get bot username dynamically
 let botUsername = "";
@@ -188,22 +189,22 @@ bot.on("message", async (msg) => {
       return bot.sendMessage(chatId, "⚠️ Unable to verify group membership.");
     }
 
-// Send post to group first (without reply_markup)
-const sent = await bot.sendMessage(process.env.GROUP_CHAT_ID, postText, {
-  parse_mode: "Markdown",
-});
+    // Send post to group first (without reply_markup)
+    const sent = await bot.sendMessage(process.env.GROUP_CHAT_ID, postText, {
+      parse_mode: "Markdown",
+    });
 
-// Then safely add the button using the real message_id
-await bot.editMessageReplyMarkup(
-  {
-    inline_keyboard: [
-      [
-        { text: "💬 0 Comments", url: `https://t.me/${botUsername}?start=comment_${sent.message_id}` },
-      ],
-    ],
-  },
-  { chat_id: process.env.GROUP_CHAT_ID, message_id: sent.message_id }
-);
+    // Then safely add the button using the real message_id
+    await bot.editMessageReplyMarkup(
+      {
+        inline_keyboard: [
+          [
+            { text: "💬 0 Comments", url: `https://t.me/${botUsername}?start=comment_${sent.message_id}` },
+          ],
+        ],
+      },
+      { chat_id: process.env.GROUP_CHAT_ID, message_id: sent.message_id }
+    );
 
 
     // Store post info
@@ -277,34 +278,34 @@ bot.on("message", async (msg) => {
     }
 
     // Handle threaded replies
-if (session && session.step === "replying") {
-  const { messageId, commentIndex } = session;
-  const post = posts[messageId];
-  const comment = post?.comments[commentIndex];
+  if (session && session.step === "replying") {
+    const { messageId, commentIndex } = session;
+    const post = posts[messageId];
+    const comment = post?.comments[commentIndex];
 
-  if (!comment) {
+    if (!comment) {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "⚠️ Comment no longer exists.");
+    }
+
+    if (text === "/cancel") {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "🚫 Reply cancelled.");
+    }
+
+    // Save reply
+    comment.replies = comment.replies || [];
+    comment.replies.push(text);
+
     delete userSessions[chatId];
-    return bot.sendMessage(chatId, "⚠️ Comment no longer exists.");
+
+    await bot.sendMessage(chatId, "✅ Reply added anonymously!");
+
+    // Display threaded reply right under the comment
+    await bot.sendMessage(chatId, `↪️ *Reply to Comment ${commentIndex + 1}:*\n${text}`, {
+      parse_mode: "Markdown",
+    });
   }
-
-  if (text === "/cancel") {
-    delete userSessions[chatId];
-    return bot.sendMessage(chatId, "🚫 Reply cancelled.");
-  }
-
-  // Save reply
-  comment.replies = comment.replies || [];
-  comment.replies.push(text);
-
-  delete userSessions[chatId];
-
-  await bot.sendMessage(chatId, "✅ Reply added anonymously!");
-
-  // Display threaded reply right under the comment
-  await bot.sendMessage(chatId, `↪️ *Reply to Comment ${commentIndex + 1}:*\n${text}`, {
-    parse_mode: "Markdown",
-  });
-}
 
 
     const post = posts[session.messageId];
@@ -338,6 +339,8 @@ if (session && session.step === "replying") {
     delete userSessions[chatId];
     return bot.sendMessage(chatId, "✅ Comment added anonymously!");
   }
+});
+
   // Handle reactions and threaded replies
 bot.on("callback_query", async (query) => {
   const { data, message } = query;
@@ -355,28 +358,67 @@ bot.on("callback_query", async (query) => {
 
   // --- Reaction handling ---
   if (["like", "love", "funny"].includes(action)) {
-    comment.reactions = comment.reactions || { like: 0, love: 0, funny: 0 };
-    comment.reactions[action]++;
+    const idx = Number(commentIndex);
+    if (Number.isNaN(idx)) {
+      return bot.answerCallbackQuery(query.id, { text: "Invalid comment index." });
+    }
 
-    const r = comment.reactions;
-    await bot.editMessageReplyMarkup(
-      {
-        inline_keyboard: [
-          [
-            { text: `👍 ${r.like}`, callback_data: `like_${postId}_${commentIndex}` },
-            { text: `❤️ ${r.love}`, callback_data: `love_${postId}_${commentIndex}` },
-            { text: `😂 ${r.funny}`, callback_data: `funny_${postId}_${commentIndex}` },
-          ],
-          [{ text: "↩️ Reply", callback_data: `reply_${postId}_${commentIndex}` }],
-        ],
-      },
-      {
-        chat_id: chatId,
-        message_id: message.message_id,
+    // Ensure post and comment exist
+    if (!posts[postId] || !posts[postId].comments[idx]) {
+      return bot.answerCallbackQuery(query.id, { text: "Comment no longer exists." });
+    }
+
+    const commentObj = posts[postId].comments[idx];
+
+    // Initialize reaction structures
+    commentObj.reactions = commentObj.reactions || { like: 0, love: 0, funny: 0 };
+    commentObj.userReactions = commentObj.userReactions || {}; // Track per-user reactions
+
+    const userId = query.from.id;
+    const previousReaction = commentObj.userReactions[userId];
+
+    // --- Toggle logic ---
+    if (previousReaction === action) {
+      // User clicked the same reaction → remove it
+      commentObj.reactions[action] = Math.max((commentObj.reactions[action] || 1) - 1, 0);
+      delete commentObj.userReactions[userId];
+      await bot.answerCallbackQuery(query.id, { text: `❌ Removed your ${action} reaction` });
+    } else {
+      // User clicked a new reaction → switch
+      if (previousReaction) {
+        // Remove their old reaction first
+        commentObj.reactions[previousReaction] = Math.max((commentObj.reactions[previousReaction] || 1) - 1, 0);
       }
-    );
+      commentObj.reactions[action] = (commentObj.reactions[action] || 0) + 1;
+      commentObj.userReactions[userId] = action;
+      await bot.answerCallbackQuery(query.id, { text: `✅ You reacted: ${action}` });
+    }
 
-    return bot.answerCallbackQuery(query.id, { text: `You reacted with ${action}` });
+    // Update inline keyboard with new counts
+    const { like, love, funny } = commentObj.reactions;
+
+    try {
+      await bot.editMessageReplyMarkup(
+        {
+          inline_keyboard: [
+            [
+              { text: `👍 ${like}`, callback_data: `like_${postId}_${idx}` },
+              { text: `❤️ ${love}`, callback_data: `love_${postId}_${idx}` },
+              { text: `😂 ${funny}`, callback_data: `funny_${postId}_${idx}` },
+            ],
+            [{ text: "↩️ Reply", callback_data: `reply_${postId}_${idx}` }],
+          ],
+        },
+        {
+          chat_id: message.chat.id,
+          message_id: message.message_id,
+        }
+      );
+    } catch (err) {
+      console.error("Failed to edit message markup for reaction:", err.message || "Unknown error");
+    }
+
+    return;
   }
 
   // --- Reply handling ---
@@ -390,6 +432,4 @@ bot.on("callback_query", async (query) => {
     await bot.sendMessage(chatId, "💬 Type your reply to this comment (or /cancel to stop):");
     return bot.answerCallbackQuery(query.id);
   }
-});
-
 });
