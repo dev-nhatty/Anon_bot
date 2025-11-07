@@ -16,6 +16,10 @@ bot.getMe().then((me) => {
   console.log(`🤖 Bot @${botUsername} is running...`);
 });
 
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("⚠️ Unhandled Rejection:", reason);
+});
+
 // Commands setup (visible everywhere but they direct users to bot)
 bot.setMyCommands([
   { command: "start", description: "Start using the bot" },
@@ -338,6 +342,42 @@ bot.on("message", async (msg) => {
 
     delete userSessions[chatId];
     return bot.sendMessage(chatId, "✅ Comment added anonymously!");
+  }
+});
+
+// 🧩 Fix: Handle actual reply submissions (separate from comments)
+bot.on("message", async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
+  const session = userSessions[chatId];
+
+  if (session && session.step === "replying") {
+    const { messageId, commentIndex } = session;
+    const post = posts[messageId];
+    const comment = post?.comments[commentIndex];
+
+    if (!comment) {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "⚠️ Comment no longer exists.");
+    }
+
+    if (text === "/cancel") {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "🚫 Reply cancelled.");
+    }
+
+    // Save reply
+    comment.replies = comment.replies || [];
+    comment.replies.push({ text });
+
+    delete userSessions[chatId];
+
+    await bot.sendMessage(chatId, "✅ Reply added anonymously!");
+    await bot.sendMessage(
+      chatId,
+      `↪️ *Reply to Comment ${commentIndex + 1}:*\n${text}`,
+      { parse_mode: "Markdown" }
+    );
   }
 });
 
