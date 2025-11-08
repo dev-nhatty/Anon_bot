@@ -240,21 +240,65 @@ bot.onText(/\/start comment_(.+)/, async (msg, match) => {
   if (post.comments.length > 0) {
     for (let i = 0; i < post.comments.length; i++) {
       const comment = post.comments[i];
-      await bot.sendMessage(chatId, `💭 *Comment ${i + 1}:*\n${comment.text}`, {
 
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "👍 0", callback_data: `like_${messageId}_${i}` },
-              { text: "❤️ 0", callback_data: `love_${messageId}_${i}` },
-              { text: "😂 0", callback_data: `funny_${messageId}_${i}` },
-            ],
-            [{ text: "↩️ Reply", callback_data: `reply_${messageId}_${i}` }],
+  // Send the main comment
+  const sentComment = await bot.sendMessage(
+    chatId,
+    `💭 *Comment ${i + 1}:*\n${comment.text}`,
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: `❤️ ${comment.reactions?.love || 0}`, callback_data: `love_${messageId}_${i}` },
+            { text: `🙌 ${comment.reactions?.support || 0}`, callback_data: `support_${messageId}_${i}` },
+            { text: `🙏 ${comment.reactions?.amen || 0}`, callback_data: `amen_${messageId}_${i}` },
           ],
-        },
-      });
+          [
+            { text: `🤝 ${comment.reactions?.agree || 0}`, callback_data: `agree_${messageId}_${i}` },
+            { text: `🙅 ${comment.reactions?.disagree || 0}`, callback_data: `disagree_${messageId}_${i}` },
+          ],
+          [{ text: "↩️ Reply", callback_data: `reply_${messageId}_${i}` }],
+        ],
+      },
     }
+  );
+
+  // Then send replies as separate messages under the comment
+  if (comment.replies && comment.replies.length > 0) {
+    for (let j = 0; j < comment.replies.length; j++) {
+      const reply = comment.replies[j];
+      await bot.sendMessage(
+        chatId,
+        `↪️ *Reply ${j + 1}:* ${reply.text || reply}`,
+        {
+          parse_mode: "Markdown",
+          reply_to_message_id: sentComment.message_id, // ensures it's visually nested under the comment
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: `👍 ${reply.reactions?.like || 0}`,
+                  callback_data: `replylike_${messageId}_${i}_${j}`,
+                },
+                {
+                  text: `❤️ ${reply.reactions?.love || 0}`,
+                  callback_data: `replylove_${messageId}_${i}_${j}`,
+                },
+                {
+                  text: `😂 ${reply.reactions?.funny || 0}`,
+                  callback_data: `replyfunny_${messageId}_${i}_${j}`,
+                },
+              ],
+            ],
+          },
+        }
+      );
+    }
+  }
+}
+
+
   } else {
     await bot.sendMessage(chatId, "No comments yet. Be the first to comment!");
   }
@@ -345,7 +389,7 @@ bot.on("message", async (msg) => {
   }
 });
 
-// 🧩 Fix: Handle actual reply submissions (separate from comments)
+// Fix: Handle actual reply submissions (separate from comments)
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
@@ -397,7 +441,7 @@ bot.on("callback_query", async (query) => {
   const comment = post.comments[commentIndex];
 
   // --- Reaction handling (independent toggle) ---
-  if (["like", "love", "funny"].includes(action)) {
+  if (["love", "support", "amen", "agree", "disagree"].includes(action)) {
     const idx = Number(commentIndex);
     if (Number.isNaN(idx)) {
       return bot.answerCallbackQuery(query.id, { text: "Invalid comment index." });
@@ -411,7 +455,7 @@ bot.on("callback_query", async (query) => {
     const commentObj = posts[postId].comments[idx];
 
     // Initialize reactions and user reaction tracking
-    commentObj.reactions = commentObj.reactions || { like: 0, love: 0, funny: 0 };
+    commentObj.reactions = commentObj.reactions || { love: 0, support: 0, amen: 0, agree: 0, disagree: 0 };
     commentObj.userReactions = commentObj.userReactions || {}; // userReactions[userId] = { like: true, love: false, ... }
 
     const userId = query.from.id;
@@ -431,16 +475,20 @@ bot.on("callback_query", async (query) => {
     }
 
     // Update the inline keyboard with new counts
-    const { like, love, funny } = commentObj.reactions;
+    const { love, support, amen, agree, disagree } = commentObj.reactions;
 
     try {
       await bot.editMessageReplyMarkup(
         {
           inline_keyboard: [
             [
-              { text: `👍 ${like}`, callback_data: `like_${postId}_${idx}` },
               { text: `❤️ ${love}`, callback_data: `love_${postId}_${idx}` },
-              { text: `😂 ${funny}`, callback_data: `funny_${postId}_${idx}` },
+              { text: `🙌 ${support}`, callback_data: `support_${postId}_${idx}` },
+              { text: `🙏 ${amen}`, callback_data: `amen_${postId}_${idx}` },
+            ],
+            [
+              { text: `🤝 ${agree}`, callback_data: `agree_${postId}_${idx}` },
+              { text: `🙅 ${disagree}`, callback_data: `disagree_${postId}_${idx}` },
             ],
             [{ text: "↩️ Reply", callback_data: `reply_${postId}_${idx}` }],
           ],
@@ -452,6 +500,67 @@ bot.on("callback_query", async (query) => {
       );
     } catch (err) {
       console.error("Failed to update reactions:", err.message);
+    }
+    return;
+  }
+  
+    // --- Reply Reaction handling (like/love/funny on replies) ---
+  if (["replylove", "replysupport", "replyamen", "replyagree", "replydisagree"].some(a => data.startsWith(a))) {
+    const [fullAction, postId, commentIndex, replyIndex] = data.split("_");
+    const baseAction = fullAction.replace("reply", ""); // "like", "love", "funny"
+
+    const comment = posts[postId]?.comments?.[commentIndex];
+    const reply = comment?.replies?.[replyIndex];
+
+    if (!reply) {
+      return bot.answerCallbackQuery(query.id, { text: "❌ Reply no longer exists." });
+    }
+
+    // Initialize reaction data
+    reply.reactions = reply.reactions || { love: 0, support: 0, amen: 0, agree: 0, disagree: 0 };
+    reply.userReactions = reply.userReactions || {};
+
+    const userId = query.from.id;
+    reply.userReactions[userId] = reply.userReactions[userId] || {};
+
+    const alreadyReacted = reply.userReactions[userId][baseAction];
+
+    // Toggle the selected reaction independently
+    if (alreadyReacted) {
+      reply.reactions[baseAction] = Math.max((reply.reactions[baseAction] || 1) - 1, 0);
+      reply.userReactions[userId][baseAction] = false;
+      await bot.answerCallbackQuery(query.id, { text: `❌ Removed your ${baseAction} reaction` });
+    } else {
+      reply.reactions[baseAction] = (reply.reactions[baseAction] || 0) + 1;
+      reply.userReactions[userId][baseAction] = true;
+      await bot.answerCallbackQuery(query.id, { text: `✅ Added your ${baseAction} reaction` });
+    }
+
+    const { love, support, amen, agree, disagree } = reply.reactions;
+
+    // Update inline keyboard with new counts
+    try {
+      await bot.editMessageReplyMarkup(
+        {
+          inline_keyboard: [
+            [
+              { text: `❤️ ${love}`, callback_data: `replylove_${postId}_${commentIndex}_${replyIndex}` },
+              { text: `🙌 ${support}`, callback_data: `replysupport_${postId}_${commentIndex}_${replyIndex}` },
+              { text: `🙏 ${amen}`, callback_data: `replyamen_${postId}_${commentIndex}_${replyIndex}` },
+            ],
+            [
+              { text: `🤝 ${agree}`, callback_data: `replyagree_${postId}_${commentIndex}_${replyIndex}` },
+              { text: `🙅 ${disagree}`, callback_data: `replydisagree_${postId}_${commentIndex}_${replyIndex}` },
+            ],
+          ],
+        },
+        {
+          chat_id: message.chat.id,
+          message_id: message.message_id,
+        }
+      );
+    } catch (err) {
+      console.error("Failed to update reply reactions:", err.message);
     }
 
     return;
