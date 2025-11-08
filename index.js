@@ -107,6 +107,62 @@ bot.on("message", async (msg) => {
     });
   }
 
+  // Handle media uploads (photos, videos, GIFs, stickers, docs)
+if (session.step === "typing" && (
+  msg.photo || msg.video || msg.animation || msg.sticker || msg.document
+)) {
+  let fileId, fileType;
+
+  if (msg.photo) {
+    fileId = msg.photo[msg.photo.length - 1].file_id;
+    fileType = "photo";
+  } else if (msg.video) {
+    fileId = msg.video.file_id;
+    fileType = "video";
+  } else if (msg.animation) {
+    fileId = msg.animation.file_id;
+    fileType = "animation";
+  } else if (msg.sticker) {
+    fileId = msg.sticker.file_id;
+    fileType = "sticker";
+  } else if (msg.document) {
+    fileId = msg.document.file_id;
+    fileType = "document";
+  }
+
+  userSessions[chatId] = { step: "captioning", fileId, fileType };
+
+  return bot.sendMessage(chatId, "📝 Add a caption for your media (or type 'Skip' to continue):", {
+    reply_markup: {
+      keyboard: [[{ text: "❌ Cancel" }]],
+      resize_keyboard: true,
+      one_time_keyboard: true,
+    },
+  });
+}
+
+// Handle caption input
+if (session.step === "captioning") {
+  const caption = text === "Skip" ? "" : text;
+  session.caption = caption;
+  session.step = "confirming";
+  userSessions[chatId] = session;
+
+  return bot.sendMessage(
+    chatId,
+    `🕵️ Preview:\n📎 Media: ${session.fileType}\n🗒 Caption: ${caption || "(none)"}`,
+    {
+      reply_markup: {
+        keyboard: [
+          [{ text: "✏️ Edit Caption" }, { text: "🚫 Cancel" }],
+          [{ text: "✅ Submit" }],
+        ],
+        resize_keyboard: true,
+      },
+    }
+  );
+}
+
   // Step 2: User types post content
   if (session.step === "typing") {
     userSessions[chatId] = { step: "confirming", text };
@@ -178,7 +234,7 @@ bot.on("message", async (msg) => {
   }
 
   // Step 5: Submit
-  if (text === "✅ Submit" && session.text) {
+  if (text === "✅ Submit" && (session.text || session.fileId)) {
     const postText = session.text;
     const userId = msg.from.id;
 
@@ -192,6 +248,61 @@ bot.on("message", async (msg) => {
       console.log("Membership check failed:", e);
       return bot.sendMessage(chatId, "⚠️ Unable to verify group membership.");
     }
+    
+    // Handle media post sending
+if (session.fileId) {
+  const userId = msg.from.id;
+
+  try {
+    const member = await bot.getChatMember(process.env.GROUP_CHAT_ID, userId);
+    if (!["member", "administrator", "creator"].includes(member.status)) {
+      return bot.sendMessage(chatId, "🚫 You must join the group first to post.");
+    }
+  } catch (e) {
+    console.log("Membership check failed:", e);
+    return bot.sendMessage(chatId, "⚠️ Unable to verify group membership.");
+  }
+
+  // Send media to group
+  let sent;
+const caption = session.caption || "";
+
+switch (session.fileType) {
+  case "photo":
+    sent = await bot.sendPhoto(process.env.GROUP_CHAT_ID, session.fileId, { caption });
+    break;
+  case "video":
+    sent = await bot.sendVideo(process.env.GROUP_CHAT_ID, session.fileId, { caption });
+    break;
+
+    case "animation":
+      sent = await bot.sendAnimation(process.env.GROUP_CHAT_ID, session.fileId);
+      break;
+    case "sticker":
+      sent = await bot.sendSticker(process.env.GROUP_CHAT_ID, session.fileId);
+      break;
+    case "document":
+      sent = await bot.sendDocument(process.env.GROUP_CHAT_ID, session.fileId);
+      break;
+  }
+
+  await bot.editMessageReplyMarkup(
+    {
+      inline_keyboard: [
+        [{ text: "💬 0 Comments", url: `https://t.me/${botUsername}?start=comment_${sent.message_id}` }],
+      ],
+    },
+    { chat_id: process.env.GROUP_CHAT_ID, message_id: sent.message_id }
+  );
+
+  posts[sent.message_id] = {
+    media: { type: session.fileType, id: session.fileId },
+    comments: [],
+  };
+
+  delete userSessions[chatId];
+  return bot.sendMessage(chatId, "✅ Your anonymous media post has been sent!");
+}
 
     // Send post to group first (without reply_markup)
     const sent = await bot.sendMessage(process.env.GROUP_CHAT_ID, postText, {
