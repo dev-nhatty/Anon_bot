@@ -344,8 +344,34 @@ bot.onText(/\/start comment_(.+)/, async (msg, match) => {
     return bot.sendMessage(chatId, "⚠️ Sorry, this post no longer exists.");
   }
 
-  // Step 1: Show the main post first
+  // Step 1: Show the main post first (text or media)
+if (post.text) {
   await bot.sendMessage(chatId, `🗣 *Post:*\n${post.text}`, { parse_mode: "Markdown" });
+} else if (post.media) {
+  const { type, id } = post.media;
+  const caption = post.caption || "";
+
+  switch (type) {
+    case "photo":
+      await bot.sendPhoto(chatId, id, { caption, parse_mode: "Markdown" });
+      break;
+    case "video":
+      await bot.sendVideo(chatId, id, { caption, parse_mode: "Markdown" });
+      break;
+    case "animation":
+      await bot.sendAnimation(chatId, id, { caption, parse_mode: "Markdown" });
+      break;
+    case "sticker":
+      await bot.sendSticker(chatId, id);
+      break;
+    case "document":
+      await bot.sendDocument(chatId, id, { caption, parse_mode: "Markdown" });
+      break;
+    default:
+      await bot.sendMessage(chatId, "⚠️ (Unsupported media type)");
+  }
+}
+
 
   // Step 2: Send all comments separately, each with reactions & reply buttons
   if (post.comments.length > 0) {
