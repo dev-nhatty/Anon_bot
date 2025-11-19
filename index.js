@@ -4,7 +4,7 @@ dotenv.config();
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
-// In-memory data storage (use DB like MongoDB later for persistence)
+// In-memory data storage
 const userSessions = {};
 const posts = {}; // { messageId: { text, comments: [] } }
 const userReactions = {}; // { `${postId}_${commentIndex}_${userId}`: true }
@@ -27,7 +27,7 @@ bot.setMyCommands([
   { command: "help", description: "Help on how to use the bot" },
 ]);
 
-// When someone types /post or /help in the group, redirect them to the bot privately
+// When someone types /post or /help in the group, redirect them to the bot privately, NOT FUNCTIONAL FOR NOW
 bot.onText(/\/post|\/help/, async (msg) => {
   if (msg.chat.type !== "private") {
     return bot.sendMessage(
@@ -84,7 +84,7 @@ bot.on("message", async (msg) => {
 
   const session = userSessions[chatId] || {};
 
-  // Step 1: User clicks Post
+  // When User clicks Post
   if (text === "📝 Post") {
     userSessions[chatId] = { step: "typing" };
     return bot.sendMessage(chatId, "✍️ Type your message below:", {
@@ -163,7 +163,7 @@ if (session.step === "captioning") {
   );
 }
 
-  // Step 2: User types post content
+  // When User types post content
   if (session.step === "typing") {
     userSessions[chatId] = { step: "confirming", text };
     return bot.sendMessage(chatId, `🕵️ Preview:\n\n${text}`, {
@@ -177,14 +177,14 @@ if (session.step === "captioning") {
     });
   }
 
-  // Step 3: Edit text
+  // When user wants to edit text
   if (text === "✏️ Edit") {
     session.step = "typing";
     userSessions[chatId] = session;
     return bot.sendMessage(chatId, "Please retype your message:");
   }
 
-  // Step 4: Format options
+  // Format options, NEW FEATURES WILL BE ADDED
   if (text === "🎨 Format") {
     session.step = "formatting";
     userSessions[chatId] = session;
@@ -233,7 +233,7 @@ if (session.step === "captioning") {
     });
   }
 
-  // Step 5: Submit
+  // When user clicks Submit
   if (text === "✅ Submit" && (session.text || session.fileId)) {
     const postText = session.text;
     const userId = msg.from.id;
@@ -344,7 +344,7 @@ bot.onText(/\/start comment_(.+)/, async (msg, match) => {
     return bot.sendMessage(chatId, "⚠️ Sorry, this post no longer exists.");
   }
 
-  // Step 1: Show the main post first (text or media)
+  // Show the main post first (text or media)
 if (post.text) {
   await bot.sendMessage(chatId, `🗣 *Post:*\n${post.text}`, { parse_mode: "Markdown" });
 } else if (post.media) {
@@ -373,7 +373,7 @@ if (post.text) {
 }
 
 
-  // Step 2: Send all comments separately, each with reactions & reply buttons
+  // Send all comments separately, each with reactions & reply buttons
   if (post.comments.length > 0) {
     for (let i = 0; i < post.comments.length; i++) {
       const comment = post.comments[i];
@@ -440,7 +440,7 @@ if (post.text) {
     await bot.sendMessage(chatId, "No comments yet. Be the first to comment!");
   }
 
-  // Step 3: Ask user for new comment
+  // Ask user for new comment
   await bot.sendMessage(chatId, "💬 Type your anonymous comment below or /cancel to stop.");
 
   // Step 4: Track comment session
@@ -577,7 +577,7 @@ bot.on("callback_query", async (query) => {
 
   const comment = post.comments[commentIndex];
 
-  // --- Reaction handling (independent toggle) ---
+  // Reaction handling (independent toggle)
   if (["love", "support", "amen", "agree", "disagree"].includes(action)) {
     const idx = Number(commentIndex);
     if (Number.isNaN(idx)) {
@@ -641,7 +641,7 @@ bot.on("callback_query", async (query) => {
     return;
   }
   
-    // --- Reply Reaction handling (like/love/funny on replies) ---
+    // Reply Reaction handling (like/love/funny on replies)
   if (["replylove", "replysupport", "replyamen", "replyagree", "replydisagree"].some(a => data.startsWith(a))) {
     const [fullAction, postId, commentIndex, replyIndex] = data.split("_");
     const baseAction = fullAction.replace("reply", ""); // "like", "love", "funny"
@@ -703,7 +703,7 @@ bot.on("callback_query", async (query) => {
     return;
   }
 
-  // --- Reply handling ---
+  // Reply handling
   if (action === "reply") {
     userSessions[chatId] = {
       step: "replying",
