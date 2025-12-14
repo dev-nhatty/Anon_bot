@@ -64,7 +64,8 @@ bot.getMe().then((me) => {
       const botDeepLink = `https://t.me/${botUsername}`;
 
       // Send the link message to the group (only sends once on startup)
-      const sent = await bot.sendMessage(process.env.GROUP_CHAT_ID, groupText, {
+      let sent;
+      sent = await bot.sendMessage(process.env.GROUP_CHAT_ID, groupText, {
         reply_markup: {
           inline_keyboard: [
             [{ text: "📣", url: botDeepLink }]
@@ -336,6 +337,7 @@ if (session.step === "captioning") {
   if (text === "✅ Submit" && (session.text || session.fileId)) {
     const postText = session.text;
     const userId = msg.from.id;
+    let sent;
 
     // Only allow group members to post
     try {
@@ -442,7 +444,7 @@ switch (session.fileType) {
 }
 
     // Send post to group first (without reply_markup)
-    await bot.sendMessage(process.env.GROUP_CHAT_ID, postText, {
+    sent = await bot.sendMessage(process.env.GROUP_CHAT_ID, postText, {
   message_thread_id: session.topicId,
   parse_mode: "Markdown",
 });
