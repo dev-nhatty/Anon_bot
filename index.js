@@ -1,19 +1,88 @@
 import TelegramBot from "node-telegram-bot-api";
 import dotenv from "dotenv";
 dotenv.config();
+import fs from "fs";
+import path from "path";
+
+const DATA_DIR = path.join(process.cwd(), "data");
+const POSTS_FILE = path.join(DATA_DIR, "posts.json");
+
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+function loadPosts() {
+  try {
+    ensureDataDir();
+    if (!fs.existsSync(POSTS_FILE)) {
+      fs.writeFileSync(POSTS_FILE, JSON.stringify({}, null, 2), "utf8");
+      return {};
+    }
+    const raw = fs.readFileSync(POSTS_FILE, "utf8");
+    return JSON.parse(raw || "{}");
+  } catch (err) {
+    console.error("Failed to load posts.json:", err);
+    return {};
+  }
+}
+
+function savePostsSync() {
+  try {
+    ensureDataDir();
+    // atomic-ish write: write to tmp then rename
+    const tmp = POSTS_FILE + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(posts, null, 2), "utf8");
+    fs.renameSync(tmp, POSTS_FILE);
+  } catch (err) {
+    console.error("Failed to save posts.json:", err);
+  }
+}
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
-
-// In-memory data storage (use DB like MongoDB later for persistence)
 const userSessions = {};
-const posts = {}; // { messageId: { text, comments: [] } }
+let posts = loadPosts(); 
 const userReactions = {}; // { `${postId}_${commentIndex}_${userId}`: true }
+
+//Mapped topic buttons to Telegram topic IDs
+const GROUP_TOPICS = {
+  discussion1: { id: 170, label: "Discussion 1" },
+  discussion2: { id: 171, label: "Discussion 2" },
+  discussion3: { id: 172, label: "Discussion 3" },
+};
 
 // Get bot username dynamically
 let botUsername = "";
 bot.getMe().then((me) => {
   botUsername = me.username;
   console.log(`🤖 Bot @${botUsername} is running...`);
+  (async () => {
+    try {
+      // message text shown in group
+      const groupText = `🔗 የመልእክት መጻፊያውን ቦት ይክፈቱ`;
+
+      // deep link to open the bot privately (no payload)
+      const botDeepLink = `https://t.me/${botUsername}`;
+
+      // Send the link message to the group (only sends once on startup)
+      const sent = await bot.sendMessage(process.env.GROUP_CHAT_ID, groupText, {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "📣", url: botDeepLink }]
+          ]
+        },
+      });
+
+      try {
+        await bot.pinChatMessage(process.env.GROUP_CHAT_ID, sent.message_id, { disable_notification: true });
+        console.log("Pinned bot link message in group.");
+      } catch (pinErr) {
+        // ignore pin errors (bot might not be admin)
+        console.log("Could not pin message (needs admin rights):", pinErr.message);
+      }
+    } catch (err) {
+      console.error("Failed to send bot link message to group:", err.message || err);
+    }
+  })();
 });
 
 process.on("unhandledRejection", (reason, promise) => {
@@ -99,12 +168,16 @@ bot.on("message", async (msg) => {
   // Cancel posting
   if (text === "❌ Cancel") {
     delete userSessions[chatId];
-    return bot.sendMessage(chatId, "Cancelled ✅", {
-      reply_markup: {
-        keyboard: [[{ text: "📝 Post" }, { text: "ℹ️ Help" }]],
-        resize_keyboard: true,
-      },
-    });
+    if (msg.chat.type === "private") {
+  return bot.sendMessage(chatId, "Cancelled ✅", {
+    reply_markup: {
+      keyboard: [[{ text: "📝 Post" }, { text: "ℹ️ Help" }]],
+      resize_keyboard: true,
+    },
+  });
+} else {
+  return bot.sendMessage(chatId, "Cancelled ✅"); // no buttons in groups
+}
   }
 
   // Handle media uploads (photos, videos, GIFs, stickers, docs)
@@ -165,8 +238,34 @@ if (session.step === "captioning") {
 
   // Step 2: User types post content
   if (session.step === "typing") {
-    userSessions[chatId] = { step: "confirming", text };
-    return bot.sendMessage(chatId, `🕵️ Preview:\n\n${text}`, {
+    userSessions[chatId] = { step: "choose_topic", text };
+  
+    return bot.sendMessage(chatId, "📌 መልዕክቱ ወደ የትኛው ርዕስ (Topic) ይላክ?", {
+      reply_markup: {
+        keyboard: [
+          [{ text: GROUP_TOPICS.discussion1.label }],
+          [{ text: GROUP_TOPICS.discussion2.label }],
+          [{ text: GROUP_TOPICS.discussion3.label }],
+          [{ text: "🚫 Cancel" }],
+        ],
+        resize_keyboard: true,
+      },
+    });
+  }
+  
+  if (session.step === "choose_topic") {
+    const topicEntry = Object.values(GROUP_TOPICS)
+      .find(t => t.label === text);
+  
+    if (!topicEntry) {
+      return bot.sendMessage(chatId, "⚠️ እባክዎ ከታች ካሉት ርዕሶች አንዱን ይምረጡ።");
+    }
+  
+    session.topicId = topicEntry.id;
+    session.step = "confirming";
+    userSessions[chatId] = session;
+  
+    return bot.sendMessage(chatId, `🕵️ Preview:\n\n${session.text}`, {
       reply_markup: {
         keyboard: [
           [{ text: "✏️ Edit" }, { text: "🎨 Format" }],
@@ -269,20 +368,55 @@ const caption = session.caption || "";
 
 switch (session.fileType) {
   case "photo":
-    sent = await bot.sendPhoto(process.env.GROUP_CHAT_ID, session.fileId, { caption });
+    sent = await bot.sendPhoto(
+      process.env.GROUP_CHAT_ID,
+      session.fileId,
+      {
+        caption,
+        message_thread_id: session.topicId,
+      }
+    );    
     break;
   case "video":
-    sent = await bot.sendVideo(process.env.GROUP_CHAT_ID, session.fileId, { caption });
+    sent = await bot.sendVideo(
+      process.env.GROUP_CHAT_ID,
+      session.fileId,
+      {
+        caption,
+        message_thread_id: session.topicId,
+      }
+    );
     break;
 
     case "animation":
-      sent = await bot.sendAnimation(process.env.GROUP_CHAT_ID, session.fileId);
+      sent = await bot.sendAnimation(
+        process.env.GROUP_CHAT_ID,
+        session.fileId,
+        {
+          caption,
+          message_thread_id: session.topicId,
+        }
+      );      
       break;
     case "sticker":
-      sent = await bot.sendSticker(process.env.GROUP_CHAT_ID, session.fileId);
+      sent = await bot.sendSticker(
+        process.env.GROUP_CHAT_ID,
+        session.fileId,
+        {
+          caption,
+          message_thread_id: session.topicId,
+        }
+      );     
       break;
     case "document":
-      sent = await bot.sendDocument(process.env.GROUP_CHAT_ID, session.fileId);
+      sent = await bot.sendDocument(
+        process.env.GROUP_CHAT_ID,
+        session.fileId,
+        {
+          caption,
+          message_thread_id: session.topicId,
+        }
+      );  
       break;
   }
 
@@ -299,6 +433,7 @@ switch (session.fileType) {
     media: { type: session.fileType, id: session.fileId },
     comments: [],
   };
+  savePostsSync();
 
   delete userSessions[chatId];
   return bot.sendMessage(chatId, `ጥያቄዎን ስላስቀመጡልን እናመሰናለን። \n
@@ -307,9 +442,11 @@ switch (session.fileType) {
 }
 
     // Send post to group first (without reply_markup)
-    const sent = await bot.sendMessage(process.env.GROUP_CHAT_ID, postText, {
-      parse_mode: "Markdown",
-    });
+    await bot.sendMessage(process.env.GROUP_CHAT_ID, postText, {
+  message_thread_id: session.topicId,
+  parse_mode: "Markdown",
+});
+
 
     // Then safely add the button using the real message_id
     await bot.editMessageReplyMarkup(
@@ -323,12 +460,13 @@ switch (session.fileType) {
       { chat_id: process.env.GROUP_CHAT_ID, message_id: sent.message_id }
     );
 
-
     // Store post info
     posts[sent.message_id] = {
       text: postText,
+      topicId: session.topicId,
       comments: [],
-    };
+    };    
+    savePostsSync();
 
     delete userSessions[chatId];
 
@@ -376,7 +514,6 @@ if (post.text) {
   }
 }
 
-
   // Step 2: Send all comments separately, each with reactions & reply buttons
   if (post.comments.length > 0) {
     for (let i = 0; i < post.comments.length; i++) {
@@ -414,7 +551,7 @@ if (post.text) {
         `↪️ *Reply ${j + 1}:* ${reply.text || reply}`,
         {
           parse_mode: "Markdown",
-          reply_to_message_id: sentComment.message_id, // ensures it's visually nested under the comment
+          reply_to_message_id: sentComment.message_id,
           reply_markup: {
             inline_keyboard: [
               [
@@ -504,6 +641,7 @@ bot.on("message", async (msg) => {
     }
 
     post.comments.push({ text, reactions: { like: 0, love: 0, funny: 0 }, replies: [] });
+    savePostsSync();
     console.log(`📝 New comment added to post ${session.messageId}:`, text);
 
     // Update comment count on group post
@@ -554,7 +692,7 @@ bot.on("message", async (msg) => {
     // Save reply
     comment.replies = comment.replies || [];
     comment.replies.push({ text });
-
+    savePostsSync();
     delete userSessions[chatId];
 
     await bot.sendMessage(chatId, "✅ መልስዎ በተሳካ ሁኔታ ተልኳል።");
@@ -581,7 +719,7 @@ bot.on("callback_query", async (query) => {
 
   const comment = post.comments[commentIndex];
 
-  // --- Reaction handling (independent toggle) ---
+  // --- Reaction handling (allow multiple different reactions per user, toggled independently) ---
   if (["love", "support", "amen", "agree", "disagree"].includes(action)) {
     const idx = Number(commentIndex);
     if (Number.isNaN(idx)) {
@@ -590,30 +728,34 @@ bot.on("callback_query", async (query) => {
 
     // Ensure post and comment exist
     if (!posts[postId] || !posts[postId].comments[idx]) {
-      return bot.answerCallbackQuery(query.id, { text: "ይቅርታ፣ ይህ አስተያየት አልተገኘም።" });
+      return bot.answerCallbackQuery(query.id, { text: "⚠️ ይቅርታ፣ ይህ አስተያየት አልተገኘም።" });
     }
 
     const commentObj = posts[postId].comments[idx];
 
-    // Initialize reactions and user reaction tracking
+    // Make sure reaction buckets exist
     commentObj.reactions = commentObj.reactions || { love: 0, support: 0, amen: 0, agree: 0, disagree: 0 };
-    commentObj.userReactions = commentObj.userReactions || {}; // userReactions[userId] = { like: true, love: false, ... }
+    commentObj.userReactions = commentObj.userReactions || {}; // map userId -> { love: true, agree: false, ... }
 
-    const userId = query.from.id;
-    commentObj.userReactions[userId] = commentObj.userReactions[userId] || {};
+    const userId = String(query.from.id); // use string keys to be safe
+    const userMap = commentObj.userReactions[userId] || {};
 
-    // Toggle the selected reaction independently
-    const alreadyReacted = commentObj.userReactions[userId][action];
+    const alreadyReacted = !!userMap[action];
 
     if (alreadyReacted) {
+      // remove this specific reaction only
       commentObj.reactions[action] = Math.max((commentObj.reactions[action] || 1) - 1, 0);
-      commentObj.userReactions[userId][action] = false;
+      userMap[action] = false;
       await bot.answerCallbackQuery(query.id, { text: `❌ Removed your ${action} reaction` });
     } else {
+      // add this specific reaction only
       commentObj.reactions[action] = (commentObj.reactions[action] || 0) + 1;
-      commentObj.userReactions[userId][action] = true;
+      userMap[action] = true;
       await bot.answerCallbackQuery(query.id, { text: `✅ Added your ${action} reaction` });
     }
+
+    // persist per-user map back
+    commentObj.userReactions[userId] = userMap;
 
     // Update the inline keyboard with new counts
     const { love, support, amen, agree, disagree } = commentObj.reactions;
@@ -645,53 +787,53 @@ bot.on("callback_query", async (query) => {
     return;
   }
   
-    // --- Reply Reaction handling (like/love/funny on replies) ---
+  // --- Reply reaction handling (allow multiple different reactions per user on replies) ---
   if (["replylove", "replysupport", "replyamen", "replyagree", "replydisagree"].some(a => data.startsWith(a))) {
-    const [fullAction, postId, commentIndex, replyIndex] = data.split("_");
-    const baseAction = fullAction.replace("reply", ""); // "like", "love", "funny"
+    const [fullAction, postIdR, commentIndexR, replyIndexR] = data.split("_");
+    const baseAction = fullAction.replace("reply", ""); // e.g. "love", "support"
 
-    const comment = posts[postId]?.comments?.[commentIndex];
-    const reply = comment?.replies?.[replyIndex];
+    const comment = posts[postIdR]?.comments?.[commentIndexR];
+    const reply = comment?.replies?.[replyIndexR];
 
     if (!reply) {
-      return bot.answerCallbackQuery(query.id, { text: "❌ ይቅርታ፣ ይህ መልስ አልተገኘም።" });
+      return bot.answerCallbackQuery(query.id, { text: "❌ Reply no longer exists." });
     }
 
     // Initialize reaction data
     reply.reactions = reply.reactions || { love: 0, support: 0, amen: 0, agree: 0, disagree: 0 };
-    reply.userReactions = reply.userReactions || {};
+    reply.userReactions = reply.userReactions || {}; // map userId -> { love: true, ... }
 
-    const userId = query.from.id;
-    reply.userReactions[userId] = reply.userReactions[userId] || {};
+    const userId = String(query.from.id);
+    const userMap = reply.userReactions[userId] || {};
 
-    const alreadyReacted = reply.userReactions[userId][baseAction];
+    const alreadyReacted = !!userMap[baseAction];
 
-    // Toggle the selected reaction independently
     if (alreadyReacted) {
       reply.reactions[baseAction] = Math.max((reply.reactions[baseAction] || 1) - 1, 0);
-      reply.userReactions[userId][baseAction] = false;
+      userMap[baseAction] = false;
       await bot.answerCallbackQuery(query.id, { text: `❌ Removed your ${baseAction} reaction` });
     } else {
       reply.reactions[baseAction] = (reply.reactions[baseAction] || 0) + 1;
-      reply.userReactions[userId][baseAction] = true;
+      userMap[baseAction] = true;
       await bot.answerCallbackQuery(query.id, { text: `✅ Added your ${baseAction} reaction` });
     }
 
+    reply.userReactions[userId] = userMap;
+
     const { love, support, amen, agree, disagree } = reply.reactions;
 
-    // Update inline keyboard with new counts
     try {
       await bot.editMessageReplyMarkup(
         {
           inline_keyboard: [
             [
-              { text: `❤️ ${love}`, callback_data: `replylove_${postId}_${commentIndex}_${replyIndex}` },
-              { text: `🙌 ${support}`, callback_data: `replysupport_${postId}_${commentIndex}_${replyIndex}` },
-              { text: `🙏 ${amen}`, callback_data: `replyamen_${postId}_${commentIndex}_${replyIndex}` },
+              { text: `❤️ ${love}`, callback_data: `replylove_${postIdR}_${commentIndexR}_${replyIndexR}` },
+              { text: `🙌 ${support}`, callback_data: `replysupport_${postIdR}_${commentIndexR}_${replyIndexR}` },
+              { text: `🙏 ${amen}`, callback_data: `replyamen_${postIdR}_${commentIndexR}_${replyIndexR}` },
             ],
             [
-              { text: `🤝 ${agree}`, callback_data: `replyagree_${postId}_${commentIndex}_${replyIndex}` },
-              { text: `🙅 ${disagree}`, callback_data: `replydisagree_${postId}_${commentIndex}_${replyIndex}` },
+              { text: `🤝 ${agree}`, callback_data: `replyagree_${postIdR}_${commentIndexR}_${replyIndexR}` },
+              { text: `🙅 ${disagree}`, callback_data: `replydisagree_${postIdR}_${commentIndexR}_${replyIndexR}` },
             ],
           ],
         },
@@ -718,4 +860,4 @@ bot.on("callback_query", async (query) => {
     await bot.sendMessage(chatId, "💬 ለዚህ አስተያየት መልስ ለመስጠት የሚፈልጉትን ይጻፉ (ወይም /cancel በመጠቀም ይቁሙ)፦");
     return bot.answerCallbackQuery(query.id);
   }
-});
+})
