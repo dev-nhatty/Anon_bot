@@ -29,12 +29,39 @@ function loadPosts() {
 function savePostsSync() {
   try {
     ensureDataDir();
-    // atomic-ish write: write to tmp then rename
     const tmp = POSTS_FILE + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify(posts, null, 2), "utf8");
     fs.renameSync(tmp, POSTS_FILE);
   } catch (err) {
     console.error("Failed to save posts.json:", err);
+  }
+}
+
+async function updateCommentCount(postId) {
+  const post = posts[postId];
+  if (!post) return;
+
+  const count = post.comments.length;
+
+  try {
+    await bot.editMessageReplyMarkup(
+      {
+        inline_keyboard: [
+          [
+            {
+              text: `💬 ${count} Comments`,
+              url: `https://t.me/${botUsername}?start=comment_${postId}`,
+            },
+          ],
+        ],
+      },
+      {
+        chat_id: process.env.GROUP_CHAT_ID,
+        message_id: Number(postId),
+      }
+    );
+  } catch (e) {
+    console.log("Failed to update comment count:", e.message);
   }
 }
 
@@ -153,7 +180,281 @@ bot.on("message", async (msg) => {
   if (msg.chat.type !== "private") return;
 
   const session = userSessions[chatId] || {};
+  // Commenting listener 
+  if (
+    session.step === "commenting" &&
+    (msg.photo || msg.video || msg.animation || msg.sticker || msg.document)
+  ) {
+    let fileId, fileType;
 
+    if (msg.photo) {
+      fileId = msg.photo[msg.photo.length - 1].file_id;
+      fileType = "photo";
+    } else if (msg.video) {
+      fileId = msg.video.file_id;
+      fileType = "video";
+    } else if (msg.animation) {
+      fileId = msg.animation.file_id;
+      fileType = "animation";
+    } else if (msg.sticker) {
+      fileId = msg.sticker.file_id;
+      fileType = "sticker";
+    } else if (msg.document) {
+      fileId = msg.document.file_id;
+      fileType = "document";
+    }
+
+    const post = posts[session.messageId];
+    if (!post) {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ ፖስት አልተገኘም።");
+    }
+
+    post.comments.push({
+      media: { type: fileType, id: fileId },
+      text: "",
+      reactions: {
+        love: 0,
+        support: 0,
+        amen: 0,
+        agree: 0,
+        disagree: 0,
+      },
+      userReactions: {},      
+      replies: [],
+    });
+    await updateCommentCount(session.messageId);
+    savePostsSync();
+    delete userSessions[chatId];
+
+    return bot.sendMessage(chatId, "✅ አስተያየትዎ (media) ተልኳል።");
+  }
+  // TEXT comment handler
+if (session.step === "commenting" && text && !msg.photo && !msg.video && !msg.document && !msg.sticker && !msg.animation) {
+  if (text === "/cancel") {
+    delete userSessions[chatId];
+    return bot.sendMessage(chatId, "🚫 አስተያየት ተሰርዟል።");
+  }
+
+  // move to preview instead of saving immediately
+  userSessions[chatId] = {
+    step: "confirm_comment",
+    messageId: session.messageId,
+    preview: { text },
+  };
+
+  return bot.sendMessage(chatId, `🕵️ *Preview Comment:*\n\n${text}`, {
+    parse_mode: "Markdown",
+    reply_markup: {
+      keyboard: [
+        [{ text: "✅ Send" }, { text: "✏️ Edit" }],
+        [{ text: "🚫 Cancel" }],
+      ],
+      resize_keyboard: true,
+    },
+  });
+}
+if (session.step === "confirm_comment" && text === "✅ Send") {
+  const post = posts[session.messageId];
+  if (!post) {
+    delete userSessions[chatId];
+    return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ ፖስት አልተገኘም።");
+  }
+
+  post.comments.push({
+    text: session.preview.text,
+    reactions: {
+      love: 0,
+      support: 0,
+      amen: 0,
+      agree: 0,
+      disagree: 0,
+    },
+    userReactions: {},
+    replies: [],
+  });
+
+  await updateCommentCount(session.messageId);
+  savePostsSync();
+  delete userSessions[chatId];
+
+  return bot.sendMessage(chatId, "✅ አስተያየትዎ ተልኳል።");
+}
+// MEDIA reply handler
+if (
+  session.step === "replying" &&
+  (msg.photo || msg.video || msg.animation || msg.sticker || msg.document)
+) {
+  let fileId, fileType;
+
+  if (msg.photo) {
+    fileId = msg.photo[msg.photo.length - 1].file_id;
+    fileType = "photo";
+  } else if (msg.video) {
+    fileId = msg.video.file_id;
+    fileType = "video";
+  } else if (msg.animation) {
+    fileId = msg.animation.file_id;
+    fileType = "animation";
+  } else if (msg.sticker) {
+    fileId = msg.sticker.file_id;
+    fileType = "sticker";
+  } else if (msg.document) {
+    fileId = msg.document.file_id;
+    fileType = "document";
+  }
+
+  const post = posts[session.messageId];
+  const comment = post?.comments?.[session.commentIndex];
+
+  if (!comment) {
+    delete userSessions[chatId];
+    return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ አስተያየት አልተገኘም።");
+  }
+  // 🔹 Deep nested media reply
+  if (
+    typeof session.replyIndex === "number" &&
+    typeof session.nestedIndex === "number"
+  ) {
+    const post = posts[session.messageId];
+    const comment = post.comments[session.commentIndex];
+    const parentReply = comment.replies[session.replyIndex];
+    const nestedReply = parentReply.replies[session.nestedIndex];
+
+    nestedReply.replies = nestedReply.replies || [];
+    nestedReply.replies.push({
+      media: { type: fileType, id: fileId },
+      text: "",
+      reactions: {
+        love: 0,
+        support: 0,
+        amen: 0,
+        agree: 0,
+        disagree: 0,
+      },
+      userReactions: {},
+      replies: [],
+    });
+
+    savePostsSync();
+    delete userSessions[chatId];
+    return bot.sendMessage(chatId, "✅ መልስዎ (media) ተልኳል።");
+  }
+    // 🔹 Nested media reply
+  if (typeof session.replyIndex === "number") {
+    const parentReply = comment.replies[session.replyIndex];
+
+    parentReply.replies = parentReply.replies || [];
+    parentReply.replies.push({
+      media: { type: fileType, id: fileId },
+      text: "",
+      reactions: {
+        love: 0,
+        support: 0,
+        amen: 0,
+        agree: 0,
+        disagree: 0,
+      },
+      userReactions: {},
+    });
+  }
+  // 🔹 Normal media reply
+  else {
+    comment.replies.push({
+      media: { type: fileType, id: fileId },
+      text: "",
+      reactions: {
+        love: 0,
+        support: 0,
+        amen: 0,
+        agree: 0,
+        disagree: 0,
+      },
+      userReactions: {},
+    });
+  }
+  savePostsSync();
+  delete session.replyIndex;
+  delete userSessions[chatId];
+  return bot.sendMessage(chatId, "✅ መልስዎ (media) ተልኳል።");
+}
+  // Replying listener
+  if (session.step === "replying") {
+    if (text === "/cancel") {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "🚫 Reply cancelled.");
+    }
+
+    const post = posts[session.messageId];
+    const comment = post?.comments[session.commentIndex];
+
+    if (!comment) {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ አስተያየት አልተገኘም።");
+    }
+    // 🔹 Deep nested reply (reply → reply → reply ...)
+    if (
+      typeof session.replyIndex === "number" &&
+      typeof session.nestedIndex === "number"
+    ) {
+      const post = posts[session.messageId];
+      const comment = post.comments[session.commentIndex];
+      const parentReply = comment.replies[session.replyIndex];
+      const nestedReply = parentReply.replies[session.nestedIndex];
+
+      nestedReply.replies = nestedReply.replies || [];
+      nestedReply.replies.push({
+        text,
+        reactions: {
+          love: 0,
+          support: 0,
+          amen: 0,
+          agree: 0,
+          disagree: 0,
+        },
+        userReactions: {},
+        replies: [],
+      });
+
+      savePostsSync();
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "✅ መልስዎ ተልኳል።");
+    }
+    // 🔹 If replying to a reply (nested)
+    if (typeof session.replyIndex === "number") {
+      const parentReply = comment.replies[session.replyIndex];
+
+      parentReply.replies = parentReply.replies || [];
+      parentReply.replies.push({
+        text,
+        reactions: {
+          love: 0,
+          support: 0,
+          amen: 0,
+          agree: 0,
+          disagree: 0,
+        },
+        userReactions: {},
+      });
+    } 
+    // 🔹 Normal reply to comment
+    else {
+      comment.replies.push({
+        text,
+        reactions: {
+          love: 0,
+          support: 0,
+          amen: 0,
+          agree: 0,
+          disagree: 0,
+        },
+        userReactions: {},
+      });
+    }    
+    delete userSessions[chatId];
+
+    return bot.sendMessage(chatId, "✅ መልስዎ ተልኳል።");
+  }
   // Step 1: User clicks Post
   if (text === "📝 Post") {
     userSessions[chatId] = { step: "typing" };
@@ -219,22 +520,20 @@ if (session.step === "typing" && (
 if (session.step === "captioning") {
   const caption = text === "Skip" ? "" : text;
   session.caption = caption;
-  session.step = "confirming";
+  session.step = "choose_topic";
   userSessions[chatId] = session;
 
-  return bot.sendMessage(
-    chatId,
-    `🕵️ Preview:\n📎 Media: ${session.fileType}\n🗒 Caption: ${caption || "(none)"}`,
-    {
-      reply_markup: {
-        keyboard: [
-          [{ text: "✏️ Edit Caption" }, { text: "🚫 Cancel" }],
-          [{ text: "✅ Submit" }],
-        ],
-        resize_keyboard: true,
-      },
-    }
-  );
+  return bot.sendMessage(chatId, "📌 መልዕክቱ ወደ የትኛው ርዕስ (Topic) ይላክ?", {
+    reply_markup: {
+      keyboard: [
+        [{ text: GROUP_TOPICS.discussion1.label }],
+        [{ text: GROUP_TOPICS.discussion2.label }],
+        [{ text: GROUP_TOPICS.discussion3.label }],
+        [{ text: "🚫 Cancel" }],
+      ],
+      resize_keyboard: true,
+    },
+  });
 }
 
   // Step 2: User types post content
@@ -266,7 +565,29 @@ if (session.step === "captioning") {
     session.step = "confirming";
     userSessions[chatId] = session;
   
-    return bot.sendMessage(chatId, `🕵️ Preview:\n\n${session.text}`, {
+    //PREVIEW
+  if (session.fileId) {
+    const caption = session.caption || "";
+
+    switch (session.fileType) {
+      case "photo":
+        await bot.sendPhoto(chatId, session.fileId, { caption });
+        break;
+      case "video":
+        await bot.sendVideo(chatId, session.fileId, { caption });
+        break;
+      case "animation":
+        await bot.sendAnimation(chatId, session.fileId, { caption });
+        break;
+      case "sticker":
+        await bot.sendSticker(chatId, session.fileId);
+        break;
+      case "document":
+        await bot.sendDocument(chatId, session.fileId, { caption });
+        break;
+    }
+
+    await bot.sendMessage(chatId, "🕵️ Preview:", {
       reply_markup: {
         keyboard: [
           [{ text: "✏️ Edit" }, { text: "🎨 Format" }],
@@ -275,13 +596,42 @@ if (session.step === "captioning") {
         resize_keyboard: true,
       },
     });
+
+    return;
+  }
+
+  return bot.sendMessage(chatId, `🕵️ Preview:\n\n${session.text}`, {
+    reply_markup: {
+      keyboard: [
+        [{ text: "✏️ Edit" }, { text: "🎨 Format" }],
+        [{ text: "🚫 Cancel" }, { text: "✅ Submit" }],
+      ],
+      resize_keyboard: true,
+    },
+  });
   }
 
   // Step 3: Edit text
   if (text === "✏️ Edit") {
-    session.step = "typing";
-    userSessions[chatId] = session;
-    return bot.sendMessage(chatId, "መልዕክትዎን እንደገና ይጻፉ፦");
+    // Editing a COMMENT preview
+    if (session.step === "confirm_comment") {
+      session.step = "commenting";
+      userSessions[chatId] = session;
+
+      return bot.sendMessage(chatId, "✏️ አስተያየትዎን እንደገና ይጻፉ፦", {
+        reply_markup: {
+          keyboard: [[{ text: "/cancel" }]],
+          resize_keyboard: true,
+        },
+      });
+    }
+    // Editing a POST preview
+    if (session.step === "confirming") {
+      session.step = "typing";
+      userSessions[chatId] = session;
+
+      return bot.sendMessage(chatId, "✏️ መልዕክትዎን እንደገና ይጻፉ፦");
+    }
   }
 
   // Step 4: Format options
@@ -328,11 +678,17 @@ if (session.step === "captioning") {
   if (text === "Back") {
     session.step = "confirming";
     userSessions[chatId] = session;
-    return bot.sendMessage(chatId, `Back to preview:\n\n${session.text}`, {
-      parse_mode: "Markdown",
+
+    return bot.sendMessage(chatId, "🕵️ Preview:", {
+      reply_markup: {
+        keyboard: [
+          [{ text: "✏️ Edit" }, { text: "🎨 Format" }],
+          [{ text: "🚫 Cancel" }, { text: "✅ Submit" }],
+        ],
+        resize_keyboard: true,
+      },
     });
   }
-
   // Step 5: Submit
   if (text === "✅ Submit" && (session.text || session.fileId)) {
     const postText = session.text;
@@ -521,11 +877,53 @@ if (post.text) {
     for (let i = 0; i < post.comments.length; i++) {
       const comment = post.comments[i];
 
-  // Send the main comment
-  const sentComment = await bot.sendMessage(
-    chatId,
-    `💭 *Comment ${i + 1}:*\n${comment.text}`,
-    {
+//MEDIA COMMENT DISPLAY
+  // MEDIA COMMENT DISPLAY + INLINE BUTTONS
+  if (comment.media) {
+    const { type, id } = comment.media;
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: `❤️ ${comment.reactions?.love || 0}`, callback_data: `love_${messageId}_${i}` },
+          { text: `🙌 ${comment.reactions?.support || 0}`, callback_data: `support_${messageId}_${i}` },
+          { text: `🙏 ${comment.reactions?.amen || 0}`, callback_data: `amen_${messageId}_${i}` },
+        ],
+        [
+          { text: `🤝 ${comment.reactions?.agree || 0}`, callback_data: `agree_${messageId}_${i}` },
+          { text: `🙅 ${comment.reactions?.disagree || 0}`, callback_data: `disagree_${messageId}_${i}` },
+        ],
+        [{ text: "↩️ Reply", callback_data: `reply_${messageId}_${i}` }],
+      ],
+    };
+    // 🔹 Comment label (for media comments)
+    await bot.sendMessage(
+      chatId,
+      `💭 *Comment ${i + 1}:*`,
+      { parse_mode: "Markdown" }
+    );
+    switch (type) {
+      case "photo":
+        await bot.sendPhoto(chatId, id, { reply_markup: keyboard });
+        break;
+      case "video":
+        await bot.sendVideo(chatId, id, { reply_markup: keyboard });
+        break;
+      case "animation":
+        await bot.sendAnimation(chatId, id, { reply_markup: keyboard });
+        break;
+      case "sticker":
+        await bot.sendSticker(chatId, id, { reply_markup: keyboard });
+        break;
+      case "document":
+        await bot.sendDocument(chatId, id, { reply_markup: keyboard });
+        break;
+    }
+  }
+
+  //TEXT COMMENT DISPLAY
+  if (comment.text) {
+    await bot.sendMessage(chatId, `💭 *Comment ${i + 1}:*\n${comment.text}`, {
       parse_mode: "Markdown",
       reply_markup: {
         inline_keyboard: [
@@ -541,43 +939,105 @@ if (post.text) {
           [{ text: "↩️ Reply", callback_data: `reply_${messageId}_${i}` }],
         ],
       },
-    }
-  );
+    });
+  }
 
   // Then send replies as separate messages under the comment
   if (comment.replies && comment.replies.length > 0) {
     for (let j = 0; j < comment.replies.length; j++) {
       const reply = comment.replies[j];
+    
+      const replyKeyboard = {
+        inline_keyboard: [
+          [
+            { text: `❤️ ${reply.reactions?.love || 0}`, callback_data: `replylove_${messageId}_${i}_${j}` },
+            { text: `🙌 ${reply.reactions?.support || 0}`, callback_data: `replysupport_${messageId}_${i}_${j}` },
+          ],
+          [
+            { text: `🙏 ${reply.reactions?.amen || 0}`, callback_data: `replyamen_${messageId}_${i}_${j}` },
+            { text: `🤝 ${reply.reactions?.agree || 0}`, callback_data: `replyagree_${messageId}_${i}_${j}` },
+            { text: `🙅 ${comment.reactions?.disagree || 0}`, callback_data: `disagree_${messageId}_${i}` },
+          ],
+          [
+            { text: "↩️ Reply", callback_data: `replyreply_${messageId}_${i}_${j}` },
+          ],
+        ],
+      };
+      // 🔹 Reply label (for BOTH text & media replies)
       await bot.sendMessage(
         chatId,
-        `↪️ *Reply ${j + 1}:* ${reply.text || reply}`,
-        {
-          parse_mode: "Markdown",
-          reply_to_message_id: sentComment.message_id,
-          reply_markup: {
+        `↪️ *Reply ${j + 1}:*`,
+        { parse_mode: "Markdown" }
+      );
+      // 🔹 MEDIA REPLY
+      if (reply.media) {
+        const { type, id } = reply.media;
+      
+        switch (type) {
+          case "photo":
+            await bot.sendPhoto(chatId, id, { reply_markup: replyKeyboard });
+            break;
+          case "video":
+            await bot.sendVideo(chatId, id, { reply_markup: replyKeyboard });
+            break;
+          case "animation":
+            await bot.sendAnimation(chatId, id, { reply_markup: replyKeyboard });
+            break;
+          case "sticker":
+            await bot.sendSticker(chatId, id, { reply_markup: replyKeyboard });
+            break;
+          case "document":
+            await bot.sendDocument(chatId, id, { reply_markup: replyKeyboard });
+            break;
+        }
+      }
+      
+      // 🔹 TEXT REPLY
+      if (reply.text) {
+        await bot.sendMessage(
+          chatId,
+          `${reply.text}`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: replyKeyboard,
+          }
+        );
+      }
+            // 🔹 Nested replies (reply → reply)
+      if (reply.replies && reply.replies.length > 0) {
+        for (let k = 0; k < reply.replies.length; k++) {
+          const nested = reply.replies[k];
+
+          const nestedKeyboard = {
             inline_keyboard: [
               [
-                {
-                  text: `👍 ${reply.reactions?.like || 0}`,
-                  callback_data: `replylike_${messageId}_${i}_${j}`,
-                },
-                {
-                  text: `❤️ ${reply.reactions?.love || 0}`,
-                  callback_data: `replylove_${messageId}_${i}_${j}`,
-                },
-                {
-                  text: `😂 ${reply.reactions?.funny || 0}`,
-                  callback_data: `replyfunny_${messageId}_${i}_${j}`,
-                },
+                { text: `❤️ ${nested.reactions?.love || 0}`, callback_data: `replylove_${messageId}_${i}_${j}_${k}` },
+                { text: `🙌 ${nested.reactions?.support || 0}`, callback_data: `replysupport_${messageId}_${i}_${j}_${k}` },
+              ],
+              [
+                { text: `🙏 ${nested.reactions?.amen || 0}`, callback_data: `replyamen_${messageId}_${i}_${j}_${k}` },
+                { text: `🤝 ${nested.reactions?.agree || 0}`, callback_data: `replyagree_${messageId}_${i}_${j}_${k}` },
+              ],
+              [
+                { text: `🙅 ${comment.reactions?.disagree || 0}`, callback_data: `disagree_${messageId}_${i}` },
+                { text: "↩️ Reply", callback_data: `deep_reply_${messageId}_${i}_${j}_${k}` },
               ],
             ],
-          },
+          };
+
+          await bot.sendMessage(
+            chatId,
+            `↳↳ *Reply to Reply ${k + 1}:*\n${nested.text || ""}`,
+            {
+              parse_mode: "Markdown",
+              reply_markup: nestedKeyboard,
+            }
+          );
         }
-      );
-    }
+      }      
+    }    
   }
 }
-
 
   } else {
     await bot.sendMessage(chatId, "እስካሁን ድረስ ምንም አስተያየት አልተሰጠም። የመጀመሪያውን አስተያየት ማቅረብ ይችላሉ።");
@@ -590,129 +1050,34 @@ if (post.text) {
   userSessions[chatId] = { step: "commenting", messageId };
 });
 
-
-
-// Handle actual comment submission
-bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text;
-  const session = userSessions[chatId] || {};
-
-  // Handle comment replies
-  if (session && session.step === "commenting") {
-    if (text === "/cancel") {
-      delete userSessions[chatId];
-      return bot.sendMessage(chatId, "🚫 አስተያየት የመፃፍ ሂደቱ ተቋርጧል።");
-    }
-
-    // Handle threaded replies
-  if (session && session.step === "replying") {
-    const { messageId, commentIndex } = session;
-    const post = posts[messageId];
-    const comment = post?.comments[commentIndex];
-
-    if (!comment) {
-      delete userSessions[chatId];
-      return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ አስተያየት አልተገኘም።");
-    }
-
-    if (text === "/cancel") {
-      delete userSessions[chatId];
-      return bot.sendMessage(chatId, "🚫 መልስ የመፃፍ ሂደቱ ተቋርጧል።");
-    }
-
-    // Save reply
-    comment.replies = comment.replies || [];
-    comment.replies.push(text);
-
-    delete userSessions[chatId];
-
-    await bot.sendMessage(chatId, "✅ መልስዎ በተሳካ ሁኔታ ተልኳል።")
-
-    // Display threaded reply right under the comment
-    await bot.sendMessage(chatId, `↪️ *Reply to Comment ${commentIndex + 1}:*\n${text}`, {
-      parse_mode: "Markdown",
-    });
-  }
-
-
-    const post = posts[session.messageId];
-    if (!post) {
-      delete userSessions[chatId];
-      return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ አስተያየት አልተገኘም።");
-    }
-
-    post.comments.push({ text, reactions: { like: 0, love: 0, funny: 0 }, replies: [] });
-    savePostsSync();
-    console.log(`📝 New comment added to post ${session.messageId}:`, text);
-
-    // Update comment count on group post
-    const count = post.comments.length;
-    await bot.editMessageReplyMarkup(
-      {
-        inline_keyboard: [
-          [
-            {
-              text: `💬 ${count} Comments`,
-              url: `https://t.me/${botUsername}?start=comment_${session.messageId}`,
-            },
-          ],
-        ],
-      },
-      {
-        chat_id: process.env.GROUP_CHAT_ID,
-        message_id: session.messageId,
-      }
-    );
-
-    delete userSessions[chatId];
-    return bot.sendMessage(chatId, "✅ አስተያየትዎ በተሳካ ሁኔታ ተልኳል፣ እናመሰግናለን።)");
-  }
-});
-
-// Fix: Handle actual reply submissions (separate from comments)
-bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text;
-  const session = userSessions[chatId];
-
-  if (session && session.step === "replying") {
-    const { messageId, commentIndex } = session;
-    const post = posts[messageId];
-    const comment = post?.comments[commentIndex];
-
-    if (!comment) {
-      delete userSessions[chatId];
-      return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ አስተያየት አልተገኘም።");
-    }
-
-    if (text === "/cancel") {
-      delete userSessions[chatId];
-      return bot.sendMessage(chatId, "🚫 መልስ የመፃፍ ሂደቱ ተቋርጧል።");
-    }
-
-    // Save reply
-    comment.replies = comment.replies || [];
-    comment.replies.push({ text });
-    savePostsSync();
-    delete userSessions[chatId];
-
-    await bot.sendMessage(chatId, "✅ መልስዎ በተሳካ ሁኔታ ተልኳል።");
-    await bot.sendMessage(
-      chatId,
-      `↪️ *Reply to Comment ${commentIndex + 1}:*\n${text}`,
-      { parse_mode: "Markdown" }
-    );
-  }
-});
-
   // Handle reactions and threaded replies
 bot.on("callback_query", async (query) => {
   const { data, message } = query;
   if (!data) return;
 
-  const chatId = message.chat.id;
+  // --- Deep reply handling (MUST come before generic parsing) ---
+  if (query.data.startsWith("deep_reply_")) {
+    const [, postIdD, commentIndexD, replyIndexD, nestedIndexD] =
+      query.data.split("_");
+
+    userSessions[query.message.chat.id] = {
+      step: "replying",
+      messageId: postIdD,
+      commentIndex: Number(commentIndexD),
+      replyIndex: Number(replyIndexD),
+      nestedIndex: Number(nestedIndexD),
+    };
+
+    await bot.sendMessage(
+      query.message.chat.id,
+      "💬 ለዚህ መልስ መልስ ይጻፉ (ወይም /cancel)፦"
+    );
+
+    return bot.answerCallbackQuery(query.id);
+  }
+
   const [action, postId, commentIndex] = data.split("_");
+  const chatId = message.chat.id;
   const post = posts[postId];
 
   if (!post || !post.comments[commentIndex]) {
@@ -721,7 +1086,7 @@ bot.on("callback_query", async (query) => {
 
   const comment = post.comments[commentIndex];
 
-  // --- Reaction handling (allow multiple different reactions per user, toggled independently) ---
+  // --- Reaction handling (allow m ultiple different reactions per user, toggled independently) ---
   if (["love", "support", "amen", "agree", "disagree"].includes(action)) {
     const idx = Number(commentIndex);
     if (Number.isNaN(idx)) {
@@ -850,7 +1215,6 @@ bot.on("callback_query", async (query) => {
 
     return;
   }
-
   // --- Reply handling ---
   if (action === "reply") {
     userSessions[chatId] = {
@@ -860,6 +1224,22 @@ bot.on("callback_query", async (query) => {
     };
 
     await bot.sendMessage(chatId, "💬 ለዚህ አስተያየት መልስ ለመስጠት የሚፈልጉትን ይጻፉ (ወይም /cancel በመጠቀም ይቁሙ)፦");
+    return bot.answerCallbackQuery(query.id);
+  }
+  // --- Reply-to-reply handling ---
+  if (action === "replyreply") {
+    userSessions[chatId] = {
+      step: "replying",
+      messageId: postId,
+      commentIndex: parseInt(commentIndex),
+      replyIndex: parseInt(data.split("_")[3]), // nested reply target
+    };
+
+    await bot.sendMessage(
+      chatId,
+      "💬 ለዚህ መልስ መልስ ለመስጠት የሚፈልጉትን ይጻፉ (ወይም /cancel)፦"
+    );
+
     return bot.answerCallbackQuery(query.id);
   }
 })
