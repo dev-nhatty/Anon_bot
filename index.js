@@ -280,58 +280,56 @@ if (session.step === "confirm_comment" && text === "✅ Send") {
 
   return bot.sendMessage(chatId, "✅ አስተያየትዎ ተልኳል።");
 }
-// MEDIA reply handler
-if (
-  session.step === "replying" &&
-  (msg.photo || msg.video || msg.animation || msg.sticker || msg.document)
-) {
-  let fileId, fileType;
-
-  if (msg.photo) {
-    fileId = msg.photo[msg.photo.length - 1].file_id;
-    fileType = "photo";
-  } else if (msg.video) {
-    fileId = msg.video.file_id;
-    fileType = "video";
-  } else if (msg.animation) {
-    fileId = msg.animation.file_id;
-    fileType = "animation";
-  } else if (msg.sticker) {
-    fileId = msg.sticker.file_id;
-    fileType = "sticker";
-  } else if (msg.document) {
-    fileId = msg.document.file_id;
-    fileType = "document";
+// MASTER REPLY HANDLER
+if (session.step === "replying") {
+  if (text === "/cancel") {
+    delete userSessions[chatId];
+    return bot.sendMessage(chatId, "🚫 Reply cancelled.");
   }
 
   const post = posts[session.messageId];
-  const comment = post?.comments?.[session.commentIndex];
+  if (!post) {
+    delete userSessions[chatId];
+    return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ ፖስት አልተገኘም።");
+  }
 
-  if (!comment) {
+  // Function to recursively find target reply object
+  function getTarget(container, indices) {
+    let current = container;
+    for (let idx of indices) {
+      current = current.replies[idx];
+      if (!current) return null;
+    }
+    return current;
+  }
+
+  // Determine the path of indices
+  // session.commentIndex is always defined
+  const indices = [session.commentIndex];
+  if (typeof session.replyIndex === "number") indices.push(session.replyIndex);
+  if (typeof session.nestedIndex === "number") indices.push(session.nestedIndex);
+  // Can extend further if needed in future
+
+  let target = getTarget({ replies: post.comments }, indices);
+  if (!target) {
     delete userSessions[chatId];
     return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ አስተያየት አልተገኘም።");
   }
-  // 🔹 Deep nested media reply
-  if (
-    typeof session.replyIndex === "number" &&
-    typeof session.nestedIndex === "number"
-  ) {
-    const post = posts[session.messageId];
-    const comment = post.comments[session.commentIndex];
-    const parentReply = comment.replies[session.replyIndex];
-    const nestedReply = parentReply.replies[session.nestedIndex];
 
-    nestedReply.replies = nestedReply.replies || [];
-    nestedReply.replies.push({
+  // If it's media reply
+  if (msg.photo || msg.video || msg.animation || msg.sticker || msg.document) {
+    let fileId, fileType;
+    if (msg.photo) fileId = msg.photo[msg.photo.length - 1].file_id, fileType = "photo";
+    else if (msg.video) fileId = msg.video.file_id, fileType = "video";
+    else if (msg.animation) fileId = msg.animation.file_id, fileType = "animation";
+    else if (msg.sticker) fileId = msg.sticker.file_id, fileType = "sticker";
+    else if (msg.document) fileId = msg.document.file_id, fileType = "document";
+
+    target.replies = target.replies || [];
+    target.replies.push({
       media: { type: fileType, id: fileId },
       text: "",
-      reactions: {
-        love: 0,
-        support: 0,
-        amen: 0,
-        agree: 0,
-        disagree: 0,
-      },
+      reactions: { love: 0, support: 0, amen: 0, agree: 0, disagree: 0 },
       userReactions: {},
       replies: [],
     });
@@ -340,121 +338,21 @@ if (
     delete userSessions[chatId];
     return bot.sendMessage(chatId, "✅ መልስዎ (media) ተልኳል።");
   }
-    // 🔹 Nested media reply
-  if (typeof session.replyIndex === "number") {
-    const parentReply = comment.replies[session.replyIndex];
 
-    parentReply.replies = parentReply.replies || [];
-    parentReply.replies.push({
-      media: { type: fileType, id: fileId },
-      text: "",
-      reactions: {
-        love: 0,
-        support: 0,
-        amen: 0,
-        agree: 0,
-        disagree: 0,
-      },
-      userReactions: {},
-    });
-  }
-  // 🔹 Normal media reply
-  else {
-    comment.replies.push({
-      media: { type: fileType, id: fileId },
-      text: "",
-      reactions: {
-        love: 0,
-        support: 0,
-        amen: 0,
-        agree: 0,
-        disagree: 0,
-      },
-      userReactions: {},
-    });
-  }
+  // Text reply
+  target.replies = target.replies || [];
+  target.replies.push({
+    text,
+    reactions: { love: 0, support: 0, amen: 0, agree: 0, disagree: 0 },
+    userReactions: {},
+    replies: [],
+  });
+
   savePostsSync();
-  delete session.replyIndex;
   delete userSessions[chatId];
-  return bot.sendMessage(chatId, "✅ መልስዎ (media) ተልኳል።");
+  return bot.sendMessage(chatId, "✅ መልስዎ ተልኳል።");
 }
-  // Replying listener
-  if (session.step === "replying") {
-    if (text === "/cancel") {
-      delete userSessions[chatId];
-      return bot.sendMessage(chatId, "🚫 Reply cancelled.");
-    }
 
-    const post = posts[session.messageId];
-    const comment = post?.comments[session.commentIndex];
-
-    if (!comment) {
-      delete userSessions[chatId];
-      return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ አስተያየት አልተገኘም።");
-    }
-    // 🔹 Deep nested reply (reply → reply → reply ...)
-    if (
-      typeof session.replyIndex === "number" &&
-      typeof session.nestedIndex === "number"
-    ) {
-      const post = posts[session.messageId];
-      const comment = post.comments[session.commentIndex];
-      const parentReply = comment.replies[session.replyIndex];
-      const nestedReply = parentReply.replies[session.nestedIndex];
-
-      nestedReply.replies = nestedReply.replies || [];
-      nestedReply.replies.push({
-        text,
-        reactions: {
-          love: 0,
-          support: 0,
-          amen: 0,
-          agree: 0,
-          disagree: 0,
-        },
-        userReactions: {},
-        replies: [],
-      });
-
-      savePostsSync();
-      delete userSessions[chatId];
-      return bot.sendMessage(chatId, "✅ መልስዎ ተልኳል።");
-    }
-    // 🔹 If replying to a reply (nested)
-    if (typeof session.replyIndex === "number") {
-      const parentReply = comment.replies[session.replyIndex];
-
-      parentReply.replies = parentReply.replies || [];
-      parentReply.replies.push({
-        text,
-        reactions: {
-          love: 0,
-          support: 0,
-          amen: 0,
-          agree: 0,
-          disagree: 0,
-        },
-        userReactions: {},
-      });
-    } 
-    // 🔹 Normal reply to comment
-    else {
-      comment.replies.push({
-        text,
-        reactions: {
-          love: 0,
-          support: 0,
-          amen: 0,
-          agree: 0,
-          disagree: 0,
-        },
-        userReactions: {},
-      });
-    }    
-    delete userSessions[chatId];
-
-    return bot.sendMessage(chatId, "✅ መልስዎ ተልኳል።");
-  }
   // Step 1: User clicks Post
   if (text === "📝 Post") {
     userSessions[chatId] = { step: "typing" };
