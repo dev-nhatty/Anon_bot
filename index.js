@@ -36,7 +36,64 @@ function savePostsSync() {
     console.error("Failed to save posts.json:", err);
   }
 }
+async function sendRepliesRecursive(chatId, postId, replies, prefix = "") {
+  if (!replies || !replies.length) return;
 
+  for (let i = 0; i < replies.length; i++) {
+    const reply = replies[i];
+    const replyKeyboard = {
+      inline_keyboard: [
+        [
+          { text: `❤️ ${reply.reactions?.love || 0}`, callback_data: `replylove_${postId}_${prefix}${i}` },
+          { text: `🙌 ${reply.reactions?.support || 0}`, callback_data: `replysupport_${postId}_${prefix}${i}` },
+        ],
+        [
+          { text: `🙏 ${reply.reactions?.amen || 0}`, callback_data: `replyamen_${postId}_${prefix}${i}` },
+          { text: `🤝 ${reply.reactions?.agree || 0}`, callback_data: `replyagree_${postId}_${prefix}${i}` },
+          { text: `🙅 ${reply.reactions?.disagree || 0}`, callback_data: `replydisagree_${postId}_${prefix}${i}` },
+        ],
+        [
+          { text: "↩️ Reply", callback_data: `deep_reply_${postId}_${prefix}${i}` },
+        ],
+      ],
+    };
+
+    // Label with depth arrows
+    const depthArrows = "↪️".repeat((prefix.match(/_/g) || []).length + 1);
+    const messageText = reply.text ? `${depthArrows} ${reply.text}` : `${depthArrows} (Media reply)`;
+
+    // Send media or text
+    if (reply.media) {
+      switch (reply.media.type) {
+        case "photo":
+          await bot.sendPhoto(chatId, reply.media.id, { reply_markup: replyKeyboard });
+          break;
+        case "video":
+          await bot.sendVideo(chatId, reply.media.id, { reply_markup: replyKeyboard });
+          break;
+        case "animation":
+          await bot.sendAnimation(chatId, reply.media.id, { reply_markup: replyKeyboard });
+          break;
+        case "sticker":
+          await bot.sendSticker(chatId, reply.media.id, { reply_markup: replyKeyboard });
+          break;
+        case "document":
+          await bot.sendDocument(chatId, reply.media.id, { reply_markup: replyKeyboard });
+          break;
+      }
+    }
+
+    if (reply.text) {
+      await bot.sendMessage(chatId, messageText, {
+        parse_mode: "Markdown",
+        reply_markup: replyKeyboard,
+      });
+    }
+
+    // Recursive call for nested replies
+    await sendRepliesRecursive(chatId, postId, reply.replies, `${prefix}${i}_`);
+  }
+}
 async function updateCommentCount(postId) {
   const post = posts[postId];
   if (!post) return;
@@ -280,55 +337,71 @@ if (session.step === "confirm_comment" && text === "✅ Send") {
 
   return bot.sendMessage(chatId, "✅ አስተያየትዎ ተልኳል።");
 }
-// MASTER REPLY HANDLER
-if (session.step === "replying") {
-  if (text === "/cancel") {
-    delete userSessions[chatId];
-    return bot.sendMessage(chatId, "🚫 Reply cancelled.");
-  }
-
-  const post = posts[session.messageId];
-  if (!post) {
-    delete userSessions[chatId];
-    return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ ፖስት አልተገኘም።");
-  }
-
-  // Function to recursively find target reply object
-  function getTarget(container, indices) {
-    let current = container;
-    for (let idx of indices) {
-      current = current.replies[idx];
-      if (!current) return null;
+// MASTER REPLY HANDLER (arbitrary depth)
+  if (session.step === "replying") {
+    if (text === "/cancel") {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "🚫 Reply cancelled.");
     }
-    return current;
-  }
 
-  // Determine the path of indices
-  // session.commentIndex is always defined
-  const indices = [session.commentIndex];
-  if (typeof session.replyIndex === "number") indices.push(session.replyIndex);
-  if (typeof session.nestedIndex === "number") indices.push(session.nestedIndex);
-  // Can extend further if needed in future
+    const post = posts[session.messageId];
+    if (!post) {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ ፖስት አልተገኘም።");
+    }
 
-  let target = getTarget({ replies: post.comments }, indices);
-  if (!target) {
-    delete userSessions[chatId];
-    return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ አስተያየት አልተገኘም።");
-  }
+    // Recursive function to get target object by path
+    function getTargetByPath(container, path) {
+      let current = { replies: container.comments };
+      for (let idx of path) {
+        current = current.replies[idx];
+        if (!current) return null;
+      }
+      return current;
+    }
 
-  // If it's media reply
-  if (msg.photo || msg.video || msg.animation || msg.sticker || msg.document) {
-    let fileId, fileType;
-    if (msg.photo) fileId = msg.photo[msg.photo.length - 1].file_id, fileType = "photo";
-    else if (msg.video) fileId = msg.video.file_id, fileType = "video";
-    else if (msg.animation) fileId = msg.animation.file_id, fileType = "animation";
-    else if (msg.sticker) fileId = msg.sticker.file_id, fileType = "sticker";
-    else if (msg.document) fileId = msg.document.file_id, fileType = "document";
+    // Use session.path, fallback to old indices if path undefined
+    const path = session.path || [];
+    if (!path.length) {
+      // fallback for backward compatibility
+      if (typeof session.commentIndex === "number") path.push(session.commentIndex);
+      if (typeof session.replyIndex === "number") path.push(session.replyIndex);
+      if (typeof session.nestedIndex === "number") path.push(session.nestedIndex);
+    }
 
+    const target = getTargetByPath(post, path);
+    if (!target) {
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "⚠️ ይቅርታ፣ ይህ አስተያየት አልተገኘም።");
+    }
+
+    // Media reply
+    if (msg.photo || msg.video || msg.animation || msg.sticker || msg.document) {
+      let fileId, fileType;
+      if (msg.photo) fileId = msg.photo[msg.photo.length - 1].file_id, fileType = "photo";
+      else if (msg.video) fileId = msg.video.file_id, fileType = "video";
+      else if (msg.animation) fileId = msg.animation.file_id, fileType = "animation";
+      else if (msg.sticker) fileId = msg.sticker.file_id, fileType = "sticker";
+      else if (msg.document) fileId = msg.document.file_id, fileType = "document";
+
+      target.replies = target.replies || [];
+      target.replies.push({
+        media: { type: fileType, id: fileId },
+        text: "",
+        reactions: { love: 0, support: 0, amen: 0, agree: 0, disagree: 0 },
+        userReactions: {},
+        replies: [],
+      });
+
+      savePostsSync();
+      delete userSessions[chatId];
+      return bot.sendMessage(chatId, "✅ መልስዎ (media) ተልኳል።");
+    }
+
+    // Text reply
     target.replies = target.replies || [];
     target.replies.push({
-      media: { type: fileType, id: fileId },
-      text: "",
+      text,
       reactions: { love: 0, support: 0, amen: 0, agree: 0, disagree: 0 },
       userReactions: {},
       replies: [],
@@ -336,22 +409,8 @@ if (session.step === "replying") {
 
     savePostsSync();
     delete userSessions[chatId];
-    return bot.sendMessage(chatId, "✅ መልስዎ (media) ተልኳል።");
+    return bot.sendMessage(chatId, "✅ መልስዎ ተልኳል።");
   }
-
-  // Text reply
-  target.replies = target.replies || [];
-  target.replies.push({
-    text,
-    reactions: { love: 0, support: 0, amen: 0, agree: 0, disagree: 0 },
-    userReactions: {},
-    replies: [],
-  });
-
-  savePostsSync();
-  delete userSessions[chatId];
-  return bot.sendMessage(chatId, "✅ መልስዎ ተልኳል።");
-}
 
   // Step 1: User clicks Post
   if (text === "📝 Post") {
@@ -775,167 +834,72 @@ if (post.text) {
     for (let i = 0; i < post.comments.length; i++) {
       const comment = post.comments[i];
 
-//MEDIA COMMENT DISPLAY
-  // MEDIA COMMENT DISPLAY + INLINE BUTTONS
-  if (comment.media) {
-    const { type, id } = comment.media;
+      //MEDIA COMMENT DISPLAY
+      if (comment.media) {
+        const { type, id } = comment.media;
 
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: `❤️ ${comment.reactions?.love || 0}`, callback_data: `love_${messageId}_${i}` },
-          { text: `🙌 ${comment.reactions?.support || 0}`, callback_data: `support_${messageId}_${i}` },
-          { text: `🙏 ${comment.reactions?.amen || 0}`, callback_data: `amen_${messageId}_${i}` },
-        ],
-        [
-          { text: `🤝 ${comment.reactions?.agree || 0}`, callback_data: `agree_${messageId}_${i}` },
-          { text: `🙅 ${comment.reactions?.disagree || 0}`, callback_data: `disagree_${messageId}_${i}` },
-        ],
-        [{ text: "↩️ Reply", callback_data: `reply_${messageId}_${i}` }],
-      ],
-    };
-    // 🔹 Comment label (for media comments)
-    await bot.sendMessage(
-      chatId,
-      `💭 *Comment ${i + 1}:*`,
-      { parse_mode: "Markdown" }
-    );
-    switch (type) {
-      case "photo":
-        await bot.sendPhoto(chatId, id, { reply_markup: keyboard });
-        break;
-      case "video":
-        await bot.sendVideo(chatId, id, { reply_markup: keyboard });
-        break;
-      case "animation":
-        await bot.sendAnimation(chatId, id, { reply_markup: keyboard });
-        break;
-      case "sticker":
-        await bot.sendSticker(chatId, id, { reply_markup: keyboard });
-        break;
-      case "document":
-        await bot.sendDocument(chatId, id, { reply_markup: keyboard });
-        break;
-    }
-  }
-
-  //TEXT COMMENT DISPLAY
-  if (comment.text) {
-    await bot.sendMessage(chatId, `💭 *Comment ${i + 1}:*\n${comment.text}`, {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: `❤️ ${comment.reactions?.love || 0}`, callback_data: `love_${messageId}_${i}` },
-            { text: `🙌 ${comment.reactions?.support || 0}`, callback_data: `support_${messageId}_${i}` },
-            { text: `🙏 ${comment.reactions?.amen || 0}`, callback_data: `amen_${messageId}_${i}` },
+        const keyboard = {
+          inline_keyboard: [
+            [
+              { text: `❤️ ${comment.reactions?.love || 0}`, callback_data: `love_${messageId}_${i}` },
+              { text: `🙌 ${comment.reactions?.support || 0}`, callback_data: `support_${messageId}_${i}` },
+              { text: `🙏 ${comment.reactions?.amen || 0}`, callback_data: `amen_${messageId}_${i}` },
+            ],
+            [
+              { text: `🤝 ${comment.reactions?.agree || 0}`, callback_data: `agree_${messageId}_${i}` },
+              { text: `🙅 ${comment.reactions?.disagree || 0}`, callback_data: `disagree_${messageId}_${i}` },
+            ],
+            [{ text: "↩️ Reply", callback_data: `reply_${messageId}_${i}` }],
           ],
-          [
-            { text: `🤝 ${comment.reactions?.agree || 0}`, callback_data: `agree_${messageId}_${i}` },
-            { text: `🙅 ${comment.reactions?.disagree || 0}`, callback_data: `disagree_${messageId}_${i}` },
-          ],
-          [{ text: "↩️ Reply", callback_data: `reply_${messageId}_${i}` }],
-        ],
-      },
-    });
-  }
-
-  // Then send replies as separate messages under the comment
-  if (comment.replies && comment.replies.length > 0) {
-    for (let j = 0; j < comment.replies.length; j++) {
-      const reply = comment.replies[j];
-    
-      const replyKeyboard = {
-        inline_keyboard: [
-          [
-            { text: `❤️ ${reply.reactions?.love || 0}`, callback_data: `replylove_${messageId}_${i}_${j}` },
-            { text: `🙌 ${reply.reactions?.support || 0}`, callback_data: `replysupport_${messageId}_${i}_${j}` },
-          ],
-          [
-            { text: `🙏 ${reply.reactions?.amen || 0}`, callback_data: `replyamen_${messageId}_${i}_${j}` },
-            { text: `🤝 ${reply.reactions?.agree || 0}`, callback_data: `replyagree_${messageId}_${i}_${j}` },
-            { text: `🙅 ${comment.reactions?.disagree || 0}`, callback_data: `disagree_${messageId}_${i}` },
-          ],
-          [
-            { text: "↩️ Reply", callback_data: `replyreply_${messageId}_${i}_${j}` },
-          ],
-        ],
-      };
-      // 🔹 Reply label (for BOTH text & media replies)
-      await bot.sendMessage(
-        chatId,
-        `↪️ *Reply ${j + 1}:*`,
-        { parse_mode: "Markdown" }
-      );
-      // 🔹 MEDIA REPLY
-      if (reply.media) {
-        const { type, id } = reply.media;
-      
-        switch (type) {
-          case "photo":
-            await bot.sendPhoto(chatId, id, { reply_markup: replyKeyboard });
-            break;
-          case "video":
-            await bot.sendVideo(chatId, id, { reply_markup: replyKeyboard });
-            break;
-          case "animation":
-            await bot.sendAnimation(chatId, id, { reply_markup: replyKeyboard });
-            break;
-          case "sticker":
-            await bot.sendSticker(chatId, id, { reply_markup: replyKeyboard });
-            break;
-          case "document":
-            await bot.sendDocument(chatId, id, { reply_markup: replyKeyboard });
-            break;
-        }
-      }
-      
-      // 🔹 TEXT REPLY
-      if (reply.text) {
+        };
+        // 🔹 Comment label (for media comments)
         await bot.sendMessage(
           chatId,
-          `${reply.text}`,
-          {
-            parse_mode: "Markdown",
-            reply_markup: replyKeyboard,
-          }
+          `💭 *Comment ${i + 1}:*`,
+          { parse_mode: "Markdown" }
         );
+        switch (type) {
+          case "photo":
+            await bot.sendPhoto(chatId, id, { reply_markup: keyboard });
+            break;
+          case "video":
+            await bot.sendVideo(chatId, id, { reply_markup: keyboard });
+            break;
+          case "animation":
+            await bot.sendAnimation(chatId, id, { reply_markup: keyboard });
+            break;
+          case "sticker":
+            await bot.sendSticker(chatId, id, { reply_markup: keyboard });
+            break;
+          case "document":
+            await bot.sendDocument(chatId, id, { reply_markup: keyboard });
+            break;
+        }
       }
-            // 🔹 Nested replies (reply → reply)
-      if (reply.replies && reply.replies.length > 0) {
-        for (let k = 0; k < reply.replies.length; k++) {
-          const nested = reply.replies[k];
 
-          const nestedKeyboard = {
+      //TEXT COMMENT DISPLAY
+      if (comment.text) {
+        await bot.sendMessage(chatId, `💭 *Comment ${i + 1}:*\n${comment.text}`, {
+          parse_mode: "Markdown",
+          reply_markup: {
             inline_keyboard: [
               [
-                { text: `❤️ ${nested.reactions?.love || 0}`, callback_data: `replylove_${messageId}_${i}_${j}_${k}` },
-                { text: `🙌 ${nested.reactions?.support || 0}`, callback_data: `replysupport_${messageId}_${i}_${j}_${k}` },
+                { text: `❤️ ${comment.reactions?.love || 0}`, callback_data: `love_${messageId}_${i}` },
+                { text: `🙌 ${comment.reactions?.support || 0}`, callback_data: `support_${messageId}_${i}` },
+                { text: `🙏 ${comment.reactions?.amen || 0}`, callback_data: `amen_${messageId}_${i}` },
               ],
               [
-                { text: `🙏 ${nested.reactions?.amen || 0}`, callback_data: `replyamen_${messageId}_${i}_${j}_${k}` },
-                { text: `🤝 ${nested.reactions?.agree || 0}`, callback_data: `replyagree_${messageId}_${i}_${j}_${k}` },
-              ],
-              [
+                { text: `🤝 ${comment.reactions?.agree || 0}`, callback_data: `agree_${messageId}_${i}` },
                 { text: `🙅 ${comment.reactions?.disagree || 0}`, callback_data: `disagree_${messageId}_${i}` },
-                { text: "↩️ Reply", callback_data: `deep_reply_${messageId}_${i}_${j}_${k}` },
               ],
+              [{ text: "↩️ Reply", callback_data: `reply_${messageId}_${i}` }],
             ],
-          };
-
-          await bot.sendMessage(
-            chatId,
-            `↳↳ *Reply to Reply ${k + 1}:*\n${nested.text || ""}`,
-            {
-              parse_mode: "Markdown",
-              reply_markup: nestedKeyboard,
-            }
-          );
-        }
-      }      
-    }    
-  }
-}
+          },
+        });
+      }
+      // ✅ Send ALL replies (any depth) recursively
+      await sendRepliesRecursive(chatId, messageId, comment.replies, `${i}_`);
+    }
 
   } else {
     await bot.sendMessage(chatId, "እስካሁን ድረስ ምንም አስተያየት አልተሰጠም። የመጀመሪያውን አስተያየት ማቅረብ ይችላሉ።");
@@ -952,28 +916,25 @@ if (post.text) {
 bot.on("callback_query", async (query) => {
   const { data, message } = query;
   if (!data) return;
+  // ✅ UNIVERSAL DEEP REPLY HANDLER (PATH-BASED)
+  if (data.startsWith("deep_reply_")) {
+    const parts = data.replace("deep_reply_", "").split("_");
+    const postId = parts.shift(); // first value is postId
+    const path = parts.map(Number);
 
-  // --- Deep reply handling (MUST come before generic parsing) ---
-  if (query.data.startsWith("deep_reply_")) {
-    const [, postIdD, commentIndexD, replyIndexD, nestedIndexD] =
-      query.data.split("_");
-
-    userSessions[query.message.chat.id] = {
+    userSessions[message.chat.id] = {
       step: "replying",
-      messageId: postIdD,
-      commentIndex: Number(commentIndexD),
-      replyIndex: Number(replyIndexD),
-      nestedIndex: Number(nestedIndexD),
+      messageId: postId,
+      path,
     };
 
     await bot.sendMessage(
-      query.message.chat.id,
+      message.chat.id,
       "💬 ለዚህ መልስ መልስ ይጻፉ (ወይም /cancel)፦"
     );
 
     return bot.answerCallbackQuery(query.id);
   }
-
   const [action, postId, commentIndex] = data.split("_");
   const chatId = message.chat.id;
   const post = posts[postId];
