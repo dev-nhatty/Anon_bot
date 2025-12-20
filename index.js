@@ -36,11 +36,35 @@ function savePostsSync() {
     console.error("Failed to save posts.json:", err);
   }
 }
+function buildNumericReplyLabel(prefix, index) {
+  // prefix like "0_1_" → ["0", "1"]
+  const parts = prefix
+    .split("_")
+    .filter(p => p !== "")
+    .map(n => Number(n) + 1);
+
+  // Top-level reply to comment
+  if (parts.length === 0) {
+    return `Reply ${index + 1}`;
+  }
+
+  // Nested reply
+  return [...parts, index + 1].join(".");
+}
 async function sendRepliesRecursive(chatId, postId, replies, prefix = "") {
   if (!replies || !replies.length) return;
 
   for (let i = 0; i < replies.length; i++) {
     const reply = replies[i];
+
+    // 🔢 Build numeric label
+    const label = buildNumericReplyLabel(prefix, i);
+
+    // 1️⃣ Send label as a SEPARATE message
+    await bot.sendMessage(chatId, `🧵 *${label}*`, {
+      parse_mode: "Markdown",
+    });
+
     const replyKeyboard = {
       inline_keyboard: [
         [
@@ -58,11 +82,7 @@ async function sendRepliesRecursive(chatId, postId, replies, prefix = "") {
       ],
     };
 
-    // Label with depth arrows
-    const depthArrows = "↪️".repeat((prefix.match(/_/g) || []).length + 1);
-    const messageText = reply.text ? `${depthArrows} ${reply.text}` : `${depthArrows} (Media reply)`;
-
-    // Send media or text
+    // 2️⃣ Send reply content (media or text)
     if (reply.media) {
       switch (reply.media.type) {
         case "photo":
@@ -84,14 +104,19 @@ async function sendRepliesRecursive(chatId, postId, replies, prefix = "") {
     }
 
     if (reply.text) {
-      await bot.sendMessage(chatId, messageText, {
+      await bot.sendMessage(chatId, reply.text, {
         parse_mode: "Markdown",
         reply_markup: replyKeyboard,
       });
     }
 
-    // Recursive call for nested replies
-    await sendRepliesRecursive(chatId, postId, reply.replies, `${prefix}${i}_`);
+    // 3️⃣ Recursive call for children
+    await sendRepliesRecursive(
+      chatId,
+      postId,
+      reply.replies,
+      `${prefix}${i}_`
+    );
   }
 }
 async function updateCommentCount(postId) {
@@ -1061,13 +1086,19 @@ bot.on("callback_query", async (query) => {
               { text: `🤝 ${agree}`, callback_data: `replyagree_${postIdR}_${commentIndexR}_${replyIndexR}` },
               { text: `🙅 ${disagree}`, callback_data: `replydisagree_${postIdR}_${commentIndexR}_${replyIndexR}` },
             ],
+            [
+              {
+                text: "↩️ Reply",
+                callback_data: `deep_reply_${postIdR}_${commentIndexR}_${replyIndexR}`,
+              },
+            ],
           ],
         },
         {
           chat_id: message.chat.id,
           message_id: message.message_id,
         }
-      );
+      );      
     } catch (err) {
       console.error("Failed to update reply reactions:", err.message);
     }
