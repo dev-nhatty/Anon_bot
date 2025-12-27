@@ -1,8 +1,44 @@
 import TelegramBot from "node-telegram-bot-api";
 import dotenv from "dotenv";
 dotenv.config();
+import express from "express";
+import bodyParser from "body-parser";
 import fs from "fs";
 import path from "path";
+
+const app = express();
+app.use(bodyParser.json());
+
+const bot = new TelegramBot(process.env.BOT_TOKEN);
+const PORT = process.env.PORT || 3000;
+
+// If WEBHOOK_URL exists → webhook mode (Render)
+// Else → polling mode (local)
+if (process.env.WEBHOOK_URL) {
+  const express = (await import("express")).default;
+  const bodyParser = (await import("body-parser")).default;
+
+  const app = express();
+  app.use(bodyParser.json());
+
+  const WEBHOOK_URL = `${process.env.WEBHOOK_URL}/webhook`;
+
+  await bot.setWebHook(WEBHOOK_URL);
+
+  app.post("/webhook", (req, res) => {
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
+  });
+
+  app.listen(PORT, () => {
+    console.log(`🚀 Webhook server running on port ${PORT}`);
+  });
+
+} else {
+  // ✅ LOCAL MODE
+  bot.startPolling();
+  console.log("🤖 Bot running in polling mode (local)");
+}
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const POSTS_FILE = path.join(DATA_DIR, "posts.json");
@@ -147,11 +183,9 @@ async function updateCommentCount(postId) {
   }
 }
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 const userSessions = {};
 let posts = loadPosts(); 
 const userReactions = {}; // { `${postId}_${commentIndex}_${userId}`: true }
-
 //Mapped topic buttons to Telegram topic IDs
 const GROUP_TOPICS = {
   discussion1: { id: 170, label: "Discussion 1" },
@@ -262,6 +296,23 @@ bot.on("message", async (msg) => {
   if (msg.chat.type !== "private") return;
 
   const session = userSessions[chatId] || {};
+  // CANCEL HANDLER
+if (
+  text === "❌ Cancel" ||
+  text === "🚫 Cancel" ||
+  text === "/cancel"
+) {
+  delete userSessions[chatId];
+
+  return bot.sendMessage(chatId, "🚫 ሂደቱ ተሰርዟል።", {
+    reply_markup: {
+      keyboard: [
+        [{ text: "📝 Post" }, { text: "ℹ️ Help" }],
+      ],
+      resize_keyboard: true,
+    },
+  });
+}
   // Commenting listener 
   if (
     session.step === "commenting" &&
@@ -313,11 +364,6 @@ bot.on("message", async (msg) => {
   }
   // TEXT comment handler
 if (session.step === "commenting" && text && !msg.photo && !msg.video && !msg.document && !msg.sticker && !msg.animation) {
-  if (text === "/cancel") {
-    delete userSessions[chatId];
-    return bot.sendMessage(chatId, "🚫 አስተያየት ተሰርዟል።");
-  }
-
   // move to preview instead of saving immediately
   userSessions[chatId] = {
     step: "confirm_comment",
@@ -447,21 +493,6 @@ if (session.step === "confirm_comment" && text === "✅ Send") {
         one_time_keyboard: true,
       },
     });
-  }
-
-  // Cancel posting
-  if (text === "❌ Cancel") {
-    delete userSessions[chatId];
-    if (msg.chat.type === "private") {
-  return bot.sendMessage(chatId, "Cancelled ✅", {
-    reply_markup: {
-      keyboard: [[{ text: "📝 Post" }, { text: "ℹ️ Help" }]],
-      resize_keyboard: true,
-    },
-  });
-} else {
-  return bot.sendMessage(chatId, "Cancelled ✅"); // no buttons in groups
-}
   }
 
   // Handle media uploads (photos, videos, GIFs, stickers, docs)
